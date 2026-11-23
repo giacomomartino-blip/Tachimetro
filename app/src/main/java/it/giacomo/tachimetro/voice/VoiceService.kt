@@ -84,12 +84,17 @@ class VoiceService : Service() {
     private var alertsMuted = false
     private val announced = HashSet<String>()
 
+    /** Conversazione guidata sui messaggi: leggo? rispondo? cosa? invio? */
     private sealed interface Dialog {
+        data class AskRead(val msg: IncomingMessage) : Dialog
+        data class AskReply(val msg: IncomingMessage) : Dialog
         data class ReplyText(val msg: IncomingMessage) : Dialog
         data class ReplyConfirm(val msg: IncomingMessage, val text: String) : Dialog
     }
 
     private var dialog: Dialog? = null
+    private var dialogRetry = 0
+    private val pendingMessages = ArrayDeque<IncomingMessage>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -316,7 +321,12 @@ class VoiceService : Service() {
 
         override fun onError(error: Int) {
             if (error == SpeechRecognizer.ERROR_NO_MATCH || error == SpeechRecognizer.ERROR_SPEECH_TIMEOUT) {
-                if (dialog != null) say("Non ho sentito. Annullo.") { dialog = null }
+                val d = dialog
+                if (d != null) {
+                    listeningCommand = false
+                    handleDialog(d, "")
+                    return
+                }
                 endCommand()
             } else {
                 // servizio di Google non disponibile: si usa il modello sul telefono
@@ -340,6 +350,7 @@ class VoiceService : Service() {
 
     private fun endCommand() {
         listeningCommand = false
+        main.postDelayed({ nextPendingMessage() }, 1200)
         if (!speaker.speaking) {
             Hub.voice.value = Hub.voice.value.copy(phase = VoicePhase.WAITING_WAKE)
         }
@@ -379,24 +390,95 @@ class VoiceService : Service() {
         if (!speaker.speaking && !listeningCommand) endCommand()
     }
 
+    private fun yesNo(text: String): Boolean? {
+        val t = CommandParser.normalize(text).trim()
+        if (t.isBlank()) return null
+        if (Regex("^(no|non|nah|lascia|dopo|annulla|niente|basta|ignora)").containsMatchIn(t)) return false
+        if (Regex("^(s[iì]|certo|ok|okay|va bene|leggi|leggilo|rispondi|invia|invialo|manda|mandalo|dai|perfetto|esatto)").containsMatchIn(t)) return true
+        return null
+    }
+
+    /** Ripete la domanda una volta se non ha capito, poi lascia perdere. */
+    private fun retryOrDrop(d: Dialog, question: String) {
+        if (dialogRetry < 1) {
+            dialogRetry++
+            dialog = d
+            ask("Non ho capito. $question Sì o no?")
+        } else {
+            endDialog("Lascio stare.")
+        }
+    }
+
+    private fun endDialog(text: String) {
+        dialog = null
+        dialogRetry = 0
+        say(text) { main.postDelayed({ nextPendingMessage() }, 800) }
+    }
+
     private fun handleDialog(d: Dialog, text: String) {
         when (d) {
-            is Dialog.ReplyText -> {
-                dialog = Dialog.ReplyConfirm(d.msg, text)
-                ask("Ho capito: $text. Lo invio?")
+            is Dialog.AskRead -> when (yesNo(text)) {
+                true -> {
+                    dialogRetry = 0
+                    dialog = Dialog.AskReply(d.msg)
+                    ask("${d.msg.text}. Vuoi rispondere?")
+                }
+                false -> endDialog("Va bene.")
+                null -> retryOrDrop(d, "Vuoi che lo legga?")
             }
-            is Dialog.ReplyConfirm -> {
-                dialog = null
-                val t = text.lowercase()
-                if (Regex("^(sì|si|invia|ok|va bene|certo|manda)").containsMatchIn(t)) {
-                    val ok = NotificationReader.reply(this, d.msg, d.text)
-                    if (ok) Hub.removeMessage(d.msg.key)
-                    say(if (ok) "Inviato." else "Non riesco a rispondere da qui a questo messaggio.")
+            is Dialog.AskReply -> when (yesNo(text)) {
+                true -> {
+                    dialogRetry = 0
+                    if (d.msg.replyIntent == null) {
+                        endDialog("Da qui non posso rispondere a questo messaggio.")
+                    } else {
+                        dialog = Dialog.ReplyText(d.msg)
+                        ask("Cosa rispondo?")
+                    }
+                }
+                false -> {
+                    Hub.removeMessage(d.msg.key)
+                    endDialog("Va bene.")
+                }
+                null -> retryOrDrop(d, "Vuoi rispondere?")
+            }
+            is Dialog.ReplyText -> {
+                if (text.isBlank()) {
+                    retryOrDrop(d, "Cosa rispondo?")
                 } else {
-                    say("Va bene, non lo invio.")
+                    dialogRetry = 0
+                    dialog = Dialog.ReplyConfirm(d.msg, text)
+                    ask("Ho scritto: $text. Lo invio?")
                 }
             }
+            is Dialog.ReplyConfirm -> when (yesNo(text)) {
+                true -> {
+                    val ok = NotificationReader.reply(this, d.msg, d.text)
+                    if (ok) Hub.removeMessage(d.msg.key)
+                    endDialog(if (ok) "Inviato." else "Non riesco a rispondere da qui a questo messaggio.")
+                }
+                false -> endDialog("Va bene, non lo invio.")
+                null -> retryOrDrop(d, "Lo invio?")
+            }
         }
+    }
+
+    private fun who(m: IncomingMessage): String =
+        if (m.group != null) "${m.sender} nel gruppo ${m.group} su ${m.app}" else "${m.sender} su ${m.app}"
+
+    /** Annuncia il messaggio e chiede se leggerlo. */
+    private fun announce(m: IncomingMessage) {
+        dialogRetry = 0
+        dialog = Dialog.AskRead(m)
+        ask("Messaggio in arrivo da ${who(m)}. Vuoi che lo legga?")
+    }
+
+    /** Passa al prossimo messaggio in coda, se non sei già impegnato con un altro. */
+    private fun nextPendingMessage() {
+        if (dialog != null || listeningCommand || speaker.speaking) return
+        val m = pendingMessages.removeFirstOrNull() ?: return
+        if (Hub.messages.value.none { it.key == m.key }) return nextPendingMessage()
+        announce(m)
     }
 
     private fun bringToFront(screen: Screen? = null) {
@@ -450,8 +532,9 @@ class VoiceService : Service() {
             Command.Reply -> {
                 val m = Hub.messages.value.lastOrNull { it.replyIntent != null }
                 if (m == null) say("Non ci sono messaggi a cui rispondere.") else {
+                    dialogRetry = 0
                     dialog = Dialog.ReplyText(m)
-                    ask("Cosa rispondo a ${m.sender}?")
+                    ask("Cosa rispondo a ${who(m)}?")
                 }
             }
             Command.JoinMeeting -> joinMeeting()
@@ -575,8 +658,9 @@ class VoiceService : Service() {
     private fun readMessages() {
         val list = Hub.messages.value
         if (list.isEmpty()) return say("Nessun messaggio nuovo.")
-        list.takeLast(3).forEach { m -> speaker.say("${m.sender} su ${m.app}: ${m.text}") }
-        say("Di' «Ehi Tachi, rispondi» per rispondere all'ultimo.")
+        pendingMessages.clear()
+        pendingMessages.addAll(list.drop(1))
+        announce(list.first())
     }
 
     private fun onMessages(list: List<IncomingMessage>) {
@@ -584,9 +668,10 @@ class VoiceService : Service() {
             if (!announced.add(m.key)) continue
             if (!settings.readMessages || settings.mode != "driver") continue
             if (System.currentTimeMillis() - m.time > 120_000) continue
-            say("Nuovo messaggio da ${m.sender} su ${m.app}. ${m.text}")
+            pendingMessages.addLast(m)
         }
         if (announced.size > 300) announced.clear()
+        nextPendingMessage()
     }
 
     private fun calendarEvents(fromMs: Long, toMs: Long): List<Triple<String, String, String>> {

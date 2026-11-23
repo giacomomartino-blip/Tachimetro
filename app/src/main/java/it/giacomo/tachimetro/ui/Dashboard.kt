@@ -333,7 +333,7 @@ fun MessagesPanel() {
                     Mono(m.sender.take(1).uppercase(), when (m.app) { "WhatsApp" -> "wa"; "Teams" -> "tm"; else -> "gm" }, 40.dp, 14.sp, 20.dp)
                     Column(Modifier.weight(1f)) {
                         T(m.sender, 15.sp, FontWeight.ExtraBold, maxLines = 1)
-                        Muted(m.app)
+                        Muted(listOfNotNull(m.group, m.app).joinToString(" · "))
                     }
                 }
                 T(m.text, 15.sp, maxLines = 4)
@@ -348,7 +348,7 @@ fun MessagesPanel() {
                 }
             }
         }
-        if (messages.isNotEmpty()) Muted("Per rispondere: «Ehi Tachi, rispondi». Te lo rileggo prima di inviarlo.")
+        if (messages.isNotEmpty()) Muted("All'arrivo ti chiedo se leggerlo e se rispondere. La risposta te la rileggo prima di inviarla.")
     }
 }
 

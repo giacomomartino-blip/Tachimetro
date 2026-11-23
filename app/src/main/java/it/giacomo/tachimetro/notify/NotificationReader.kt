@@ -35,8 +35,17 @@ class NotificationReader : NotificationListenerService() {
         val n = sbn.notification
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
         val extras = n.extras
-        val sender = (extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)
-            ?: extras.getCharSequence(Notification.EXTRA_TITLE))?.toString()?.trim().orEmpty()
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val convTitle = extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString()?.trim()
+        val isGroup = extras.getBoolean(Notification.EXTRA_IS_GROUP_CONVERSATION, false) || !convTitle.isNullOrBlank()
+        // nei gruppi il mittente è nell'ultimo messaggio, oppure nel titolo «Gruppo: Nome»
+        val sender = lastMessageSender(extras)
+            ?: title.substringAfterLast(": ").ifBlank { title }
+        val group = if (isGroup) {
+            (convTitle ?: title.substringBefore(": ")).replace(Regex("\\s*\\(\\d+ messaggi[^)]*\\)"), "").trim().takeIf { it.isNotBlank() && it != sender }
+        } else {
+            null
+        }
         val text = lastMessageText(extras) ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
         if (sender.isBlank() || text.isBlank()) return
         // riepiloghi tipo «3 nuovi messaggi»
@@ -56,12 +65,23 @@ class NotificationReader : NotificationListenerService() {
                 key = sbn.key + "|" + text.hashCode(),
                 app = app,
                 sender = sender,
+                group = group,
                 text = text,
                 time = sbn.postTime,
                 replyIntent = replyIntent,
                 remoteInput = remote,
             ),
         )
+    }
+
+    private fun lastMessageSender(extras: Bundle): String? {
+        @Suppress("DEPRECATION")
+        val msgs = extras.getParcelableArray(Notification.EXTRA_MESSAGES) ?: return null
+        val last = msgs.lastOrNull() as? Bundle ?: return null
+        @Suppress("DEPRECATION")
+        val person = last.getParcelable<android.app.Person>("sender_person")
+        val name = person?.name?.toString() ?: last.getCharSequence("sender")?.toString()
+        return name?.trim()?.takeIf { it.isNotBlank() }
     }
 
     private fun lastMessageText(extras: Bundle): String? {

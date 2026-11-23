@@ -29,6 +29,7 @@ data class IncomingMessage(
     val key: String,
     val app: String,
     val sender: String,
+    val group: String?,
     val text: String,
     val time: Long,
     val replyIntent: PendingIntent?,
