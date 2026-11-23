@@ -31,6 +31,7 @@ sealed interface Command {
     data object Cancel : Command
     data object CloseApp : Command
     data class AskGemini(val question: String) : Command
+    data class Unknown(val heard: String) : Command
 }
 
 object CommandParser {
@@ -44,13 +45,38 @@ object CommandParser {
 
     fun normalize(text: String): String = text.lowercase()
         .replace("’", "'")
-        .replace(Regex("^(ehi|hey|hei|ei|e)\\s+(tachi|tacchi|taxi|ta chi)[,]?\\s*"), "")
+        .replace(Regex("[.,;:!?¿¡\"]"), " ")
         .replace(Regex("\\s+"), " ")
         .trim()
+        .replace(Regex("^(ehi|hey|hei|ei|e|ok)\\s+(tachi|tacchi|taxi|taki|ta chi)\\s*"), "")
+        .trim()
+
+    /** Pezzi della parola chiave che a volte restano all'inizio del comando («chi metti la radio»). */
+    private val RESIDUE = setOf("ehi", "hey", "hei", "ei", "e", "ok", "chi", "ki", "ci", "ta", "taki", "tachi", "tacchi", "taxi")
+
+    private val QUESTION = Regex(
+        "^(chi|cosa|che|come|quando|dove|quanto|quanti|quanta|quante|perché|perche|qual|quale|quali|dimmi|spiegami|sai|mi sai|raccontami|chiedi)\\b",
+    )
 
     fun parse(raw: String): Command {
-        val t = normalize(raw)
-        if (t.isBlank()) return Command.Cancel
+        val base = normalize(raw)
+        if (base.isBlank()) return Command.Cancel
+        // prima la frase così com'è, poi senza gli eventuali resti di «Ehi Tachi» all'inizio
+        val words = base.split(" ")
+        val candidates = mutableListOf(base)
+        var i = 0
+        while (i < words.size - 1 && i < 3 && words[i] in RESIDUE) {
+            i++
+            candidates += words.drop(i).joinToString(" ")
+        }
+        for (c in candidates) tryCommand(c)?.let { return it }
+        Regex("^chiedi a gemini\\s+(.+)$").find(base)?.let { return Command.AskGemini(it.groupValues[1]) }
+        // a Gemini vanno solo le domande vere; il resto è un comando non capito
+        return if (raw.contains("?") || QUESTION.containsMatchIn(base)) Command.AskGemini(base) else Command.Unknown(base)
+    }
+
+    private fun tryCommand(t: String): Command? {
+        if (t.isBlank()) return null
 
         // annullare
         if (t in setOf("annulla", "lascia stare", "niente", "no", "basta così")) return Command.Cancel
@@ -63,7 +89,16 @@ object CommandParser {
         if (Regex("^(apri )?(le )?impostazioni").containsMatchIn(t)) return Command.Settings
         if (Regex("silenzia (gli )?avvisi").containsMatchIn(t)) return Command.Mute
 
-        // navigazione
+        // navigazione: «imposta il percorso per Roma», «navigatore per via Toledo», «come arrivo a Caserta»
+        Regex("^(imposta|impostami|avvia|calcola|fammi|apri)( il| un| la)? (percorso|navigatore|navigazione|tragitto|strada)( per| verso| fino a| a| al| alla| in)? (.+)$").find(t)?.let {
+            return navigateTo(it.groupValues[5])
+        }
+        Regex("^(percorso|navigazione|navigatore|strada|indicazioni)( per| verso| a| al| alla| in)? (.+)$").find(t)?.let {
+            return navigateTo(it.groupValues[3])
+        }
+        Regex("^come (arrivo|si arriva|vado|ci arrivo) (a|al|alla|allo|in|da) (.+)$").find(t)?.let {
+            return navigateTo(it.groupValues[3])
+        }
         if (Regex("^(torna a|usa) (google )?maps").containsMatchIn(t)) return Command.BackToMaps
         if (Regex("(ferma|termina|interrompi|chiudi) (la )?navigazione").containsMatchIn(t)) return Command.StopNavigation
         Regex("^(portami|guidami|naviga|vai|andiamo|voglio andare)\\s+(verso |a |al |alla |allo |ai |alle |all'|in |da |dal |dalla )?(.+)$").find(t)?.let { m ->
@@ -108,6 +143,9 @@ object CommandParser {
         if (Regex("abbassa (il )?volume|più piano").containsMatchIn(t)) return Command.Volume(false)
 
         // radio
+        if (Regex("^(cambia|altra) (radio|stazione)|^radio successiva|^prossima radio").containsMatchIn(t)) return Command.NextRadio
+        Regex("^(passa a|passa alla|vai su|metti su) (radio .+)$").find(t)?.let { return Command.PlayRadio(it.groupValues[2].removePrefix("radio ").trim()) }
+        Regex("^radio (.+)$").find(t)?.let { return Command.PlayRadio(it.groupValues[1].trim()) }
         Regex("^(metti|ascolta|accendi|sintonizza)( la)? radio\\s*(.*)$").find(t)?.let { return Command.PlayRadio(it.groupValues[3].trim()) }
         Regex("^(metti|ascolta|accendi) (rai radio .+|rtl.*|rds|r101|m2o|isoradio)$").find(t)?.let { return Command.PlayRadio(it.groupValues[2].trim()) }
 
@@ -134,9 +172,17 @@ object CommandParser {
         // app
         Regex("^(apri|avvia|lancia)\\s+(.+)$").find(t)?.let { return Command.OpenApp(it.groupValues[2].trim()) }
 
-        // tutto il resto va a Gemini
-        Regex("^chiedi a gemini\\s+(.+)$").find(t)?.let { return Command.AskGemini(it.groupValues[1]) }
-        return Command.AskGemini(t)
+        return null
+    }
+
+    private fun navigateTo(raw: String): Command {
+        var place = raw.trim()
+        var waze = false
+        Regex("\\s+(con|su|usando) waze$").find(place)?.let {
+            waze = true
+            place = place.removeRange(it.range).trim()
+        }
+        return Command.Navigate(normalizePlace("", place), waze)
     }
 
     /** Sì o no detto a voce; null se non si capisce. */

@@ -270,7 +270,8 @@ class VoiceService : Service() {
         stopWake()
         speaker.stop()
         speaker.beep(45)
-        main.postDelayed({ listenCommand() }, 250)
+        // lascia finire «…chi» prima di ascoltare il comando
+        main.postDelayed({ listenCommand() }, 500)
     }
 
     // ---------------- comando ----------------
@@ -649,6 +650,7 @@ class VoiceService : Service() {
             Command.Cancel -> say("Va bene.")
             Command.CloseApp -> say("Chiudo Tachimetro.") { Hub.send(UiAction.Close) }
             is Command.AskGemini -> askGemini(cmd.question)
+            is Command.Unknown -> say("Non ho capito: ${cmd.heard}.")
         }
     }
 
@@ -846,8 +848,13 @@ class VoiceService : Service() {
         scope.launch {
             try {
                 say(Gemini.ask(key, q))
+                Hub.geminiError.value = null
+            } catch (e: Gemini.GeminiException) {
+                Hub.geminiError.value = e.detail
+                say(e.spoken)
             } catch (e: Exception) {
-                say("Gemini non risponde in questo momento.")
+                Hub.geminiError.value = e.message ?: e.javaClass.simpleName
+                say("Gemini non è raggiungibile: controlla la connessione.")
             }
         }
     }

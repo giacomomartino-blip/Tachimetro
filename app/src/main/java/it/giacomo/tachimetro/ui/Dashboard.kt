@@ -57,6 +57,7 @@ import it.giacomo.tachimetro.CarGate
 import it.giacomo.tachimetro.Hub
 import it.giacomo.tachimetro.Screen
 import it.giacomo.tachimetro.UiAction
+import it.giacomo.tachimetro.VoicePhase
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Prefs
@@ -368,6 +369,18 @@ fun StatusCards(s: AppSettings) {
                 }
                 Btn("Resta aperto", height = 44.dp) { Hub.send(UiAction.StayOpen) }
             }
+        }
+    }
+    val voice by Hub.voice.collectAsState()
+    if (voice.phase in setOf(VoicePhase.LISTENING, VoicePhase.THINKING, VoicePhase.SPEAKING) &&
+        (voice.transcript.isNotBlank() || voice.answer.isNotBlank())
+    ) {
+        CardBox(pad = 12.dp, gap = 4.dp) {
+            if (voice.transcript.isNotBlank()) {
+                Muted("Ho sentito")
+                T("«${voice.transcript}»", 15.sp, FontWeight.Bold, maxLines = 2)
+            }
+            if (voice.answer.isNotBlank() && voice.phase == VoicePhase.SPEAKING) Muted(voice.answer, 13.sp, maxLines = 3)
         }
     }
     if (test && s.mode != "passenger" && s.requireCar) {

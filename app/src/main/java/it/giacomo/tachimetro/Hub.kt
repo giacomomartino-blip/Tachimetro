@@ -102,6 +102,7 @@ object Hub {
     val wakeHeard = MutableStateFlow("")
     val wakeDetectedAt = MutableStateFlow(0L)
     val incomingCall = MutableStateFlow<IncomingCall?>(null)
+    val geminiError = MutableStateFlow<String?>(null)
     val fuel = MutableStateFlow<List<FuelStation>>(emptyList())
     val actions = MutableSharedFlow<UiAction>(extraBufferCapacity = 16)
 

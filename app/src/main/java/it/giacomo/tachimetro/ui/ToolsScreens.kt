@@ -218,6 +218,12 @@ fun StatusScreen(s: AppSettings) {
                     else -> "In ascolto · sensibilità ${mapOf("low" to "bassa", "normal" to "normale", "high" to "alta")[s.wakeSensitivity]}"
                 },
             )
+            val gErr by Hub.geminiError.collectAsState()
+            StatusRow(
+                "Gemini",
+                if (s.geminiKey.isBlank()) null else gErr == null,
+                if (s.geminiKey.isBlank()) "Nessuna chiave: le domande aprono l'assistente del telefono" else gErr?.let { "Ultimo errore: $it" } ?: "Chiave inserita",
+            )
             val google = SpeechRecognizer.isRecognitionAvailable(context)
             StatusRow("Riconoscimento dei comandi", true, if (google) "Servizio vocale di Google" else "Modello interno del telefono")
             val gps = granted(context, Manifest.permission.ACCESS_FINE_LOCATION)
