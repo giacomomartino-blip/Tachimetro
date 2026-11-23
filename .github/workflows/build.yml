@@ -64,6 +64,12 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: gradle assembleRelease --no-daemon --stacktrace
 
+      # Prova automatica: come vengono capite le frasi dette a Tachi
+      - name: Prova la comprensione dei comandi
+        if: always()
+        continue-on-error: true
+        run: gradle testReleaseUnitTest --no-daemon -q || (cat app/build/test-results/testReleaseUnitTest/*.xml | grep -A3 "<failure" ; exit 1)
+
       # La firma deve restare sempre la stessa, altrimenti gli aggiornamenti non si installano
       - name: Verifica la firma dell'APK
         run: |

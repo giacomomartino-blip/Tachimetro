@@ -45,6 +45,8 @@ import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Gemini
 import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Net
+import it.giacomo.tachimetro.data.Place
+import it.giacomo.tachimetro.data.Places
 import it.giacomo.tachimetro.data.Prefs
 import it.giacomo.tachimetro.data.SpeedCameras
 import it.giacomo.tachimetro.data.Weather
@@ -102,6 +104,13 @@ class VoiceService : Service() {
         data class ComposeApp(val to: Contact, val text: String) : Dialog
         data class ComposeText(val to: Contact, val app: String) : Dialog
         data class ComposeConfirm(val to: Contact, val app: String, val text: String) : Dialog
+        data class ComposeTo(val app: String?) : Dialog
+        data class PickContact(val options: List<Contact>, val purpose: String, val app: String?, val text: String) : Dialog
+        data class AskPlace(val waze: Boolean) : Dialog
+        data class PickPlace(val options: List<Place>, val waze: Boolean) : Dialog
+        data class ConfirmRoute(val place: Place, val waze: Boolean) : Dialog
+        data class PickRadio(val options: List<String>) : Dialog
+        data object Repeat : Dialog
     }
 
     private data class Contact(val name: String, val number: String)
@@ -109,7 +118,7 @@ class VoiceService : Service() {
     private var dialog: Dialog? = null
     private var dialogRetry = 0
     /** Coda dei messaggi da annunciare; il secondo valore indica «dimmi solo chi ha scritto». */
-    private val pendingMessages = ArrayDeque<Pair<IncomingMessage, Boolean>>()
+    private val pendingMessages = ArrayDeque<Pair<IncomingMessage, Int>>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -298,7 +307,8 @@ class VoiceService : Service() {
                 .putExtra(RecognizerIntent.EXTRA_LANGUAGE, "it-IT")
                 .putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
                 .putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 3)
-                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 1200L)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, PAUSE_MS)
+                .putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, PAUSE_MS)
             sr.startListening(i)
         } else {
             listenFree()
@@ -318,7 +328,7 @@ class VoiceService : Service() {
 
                     override fun onResult(hypothesis: String?) {
                         val t = try { JSONObject(hypothesis ?: "{}").optString("text") } catch (e: Exception) { "" }
-                        if (t.isNotBlank()) main.post { stopFree(); onCommandText(t) }
+                        if (t.isNotBlank()) main.post { stopFree(); onCommandText(listOf(t)) }
                     }
 
                     override fun onFinalResult(hypothesis: String?) {}
@@ -330,7 +340,7 @@ class VoiceService : Service() {
                     override fun onTimeout() {
                         main.post { stopFree(); endCommand() }
                     }
-                }, 8000)
+                }, 15000)
             }
         } catch (e: Exception) {
             endCommand()
@@ -367,9 +377,13 @@ class VoiceService : Service() {
         }
 
         override fun onResults(results: Bundle?) {
-            val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-            val text = list?.firstOrNull().orEmpty()
-            if (text.isBlank()) endCommand() else onCommandText(text)
+            val list = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION).orEmpty().filter { it.isNotBlank() }
+            if (list.isEmpty()) {
+                val d = dialog
+                if (d != null) { listeningCommand = false; handleDialog(d, "") } else endCommand()
+            } else {
+                onCommandText(list)
+            }
         }
 
         override fun onPartialResults(partialResults: Bundle?) {
@@ -409,17 +423,37 @@ class VoiceService : Service() {
         speaker.say(text) { main.postDelayed({ listenCommand() }, 200) }
     }
 
-    private fun onCommandText(text: String) {
+    private fun onCommandText(texts: List<String>) {
         listeningCommand = false
+        val text = texts.first()
         Hub.voice.value = Hub.voice.value.copy(phase = VoicePhase.THINKING, transcript = text)
         val d = dialog
-        if (d != null) {
-            handleDialog(d, text)
+        if (d == Dialog.Repeat) {
+            dialog = null
+            val cmd = bestCommand(texts)
+            if (cmd is Command.Unknown) say("Non ho capito.") else execute(cmd)
+            if (!speaker.speaking && !listeningCommand) endCommand()
             return
         }
-        val cmd = CommandParser.parse(text)
-        execute(cmd)
+        if (d != null) {
+            // per le risposte sì o no prendo la prima trascrizione che lo dice chiaramente
+            val pick = texts.firstOrNull { yesNo(it) != null } ?: text
+            handleDialog(d, if (d.isYesNo()) pick else text)
+            return
+        }
+        execute(bestCommand(texts))
         if (!speaker.speaking && !listeningCommand) endCommand()
+    }
+
+    private fun Dialog.isYesNo() = this is Dialog.AskRead || this is Dialog.AskReply || this is Dialog.AskAnswer ||
+        this is Dialog.ReplyConfirm || this is Dialog.ComposeConfirm || this is Dialog.ConfirmRoute
+
+    /** Google propone fino a tre trascrizioni: vince la prima che è un comando conosciuto. */
+    private fun bestCommand(texts: List<String>): Command {
+        val parsed = texts.map { CommandParser.parse(it) }
+        return parsed.firstOrNull { it !is Command.Unknown && it !is Command.AskGemini }
+            ?: parsed.firstOrNull { it is Command.AskGemini }
+            ?: parsed.first()
     }
 
     private fun yesNo(text: String): Boolean? {
@@ -433,16 +467,22 @@ class VoiceService : Service() {
         if (dialogRetry < 1) {
             dialogRetry++
             dialog = d
-            ask(if (yesNoQuestion) "Non ho capito. $question Sì o no?" else "Non ho capito. $question")
+            ask(if (yesNoQuestion) "Sì o no?" else question)
         } else {
-            endDialog("Lascio stare.")
+            endDialog(null)
         }
     }
 
-    private fun endDialog(text: String) {
+    /** Chiude la conversazione; senza testo basta un bip. */
+    private fun endDialog(text: String?) {
         dialog = null
         dialogRetry = 0
-        say(text) { main.postDelayed({ nextPendingMessage() }, 800) }
+        if (text == null) {
+            speaker.beep(25)
+            endCommand()
+        } else {
+            say(text) { main.postDelayed({ nextPendingMessage() }, 800) }
+        }
     }
 
     private fun handleDialog(d: Dialog, text: String) {
@@ -453,8 +493,8 @@ class VoiceService : Service() {
                     dialog = Dialog.AskReply(d.msg)
                     ask("${d.msg.text}. Vuoi rispondere?")
                 }
-                false -> endDialog("Va bene.")
-                null -> retryOrDrop(d, "Vuoi che lo legga?")
+                false -> endDialog(null)
+                null -> retryOrDrop(d, "Lo leggo?")
             }
             is Dialog.AskReply -> when (yesNo(text)) {
                 true -> {
@@ -468,7 +508,7 @@ class VoiceService : Service() {
                 }
                 false -> {
                     Hub.removeMessage(d.msg.key)
-                    endDialog("Va bene.")
+                    endDialog(null)
                 }
                 null -> retryOrDrop(d, "Vuoi rispondere?")
             }
@@ -498,14 +538,14 @@ class VoiceService : Service() {
             is Dialog.ReplyConfirm -> if (wantsChange(text)) {
                 dialogRetry = 0
                 dialog = Dialog.ReplyText(d.msg)
-                ask("Va bene, cosa rispondo?")
+                ask("Cosa rispondo?")
             } else when (yesNo(text)) {
                 true -> {
                     val ok = NotificationReader.reply(this, d.msg, d.text)
                     if (ok) Hub.removeMessage(d.msg.key)
                     endDialog(if (ok) "Inviato." else "Non riesco a rispondere da qui a questo messaggio.")
                 }
-                false -> endDialog("Va bene, non lo invio.")
+                false -> endDialog("Non lo invio.")
                 null -> retryOrDrop(d, "Lo invio?")
             }
             is Dialog.ComposeApp -> {
@@ -520,7 +560,7 @@ class VoiceService : Service() {
                         dialogRetry = 0
                         composeNext(d.to, app, d.text)
                     }
-                    yesNo(text) == false -> endDialog("Va bene.")
+                    yesNo(text) == false -> endDialog(null)
                     else -> retryOrDrop(d, "Su WhatsApp o con SMS?", false)
                 }
             }
@@ -528,7 +568,7 @@ class VoiceService : Service() {
                 if (text.isBlank()) {
                     retryOrDrop(d, "Cosa scrivo?", false)
                 } else if (CommandParser.normalize(text) in setOf("annulla", "lascia stare", "niente")) {
-                    endDialog("Va bene.")
+                    endDialog(null)
                 } else {
                     dialogRetry = 0
                     composeNext(d.to, d.app, text)
@@ -537,17 +577,134 @@ class VoiceService : Service() {
             is Dialog.ComposeConfirm -> if (wantsChange(text)) {
                 dialogRetry = 0
                 dialog = Dialog.ComposeText(d.to, d.app)
-                ask("Va bene, cosa scrivo?")
+                ask("Cosa scrivo?")
             } else when (yesNo(text)) {
                 true -> {
                     dialog = null
                     dialogRetry = 0
                     deliver(d.to, d.app, d.text)
                 }
-                false -> endDialog("Va bene, non lo invio.")
+                false -> endDialog("Non lo invio.")
                 null -> retryOrDrop(d, "Lo invio?")
             }
+            Dialog.Repeat -> endDialog(null)
+            is Dialog.ComposeTo -> {
+                if (text.isBlank() || isNo(text)) {
+                    if (text.isBlank()) retryOrDrop(d, "A chi scrivo?", false) else endDialog(null)
+                } else {
+                    dialogRetry = 0
+                    dialog = null
+                    startCompose(Command.SendMessage(CommandParser.normalize(text).replace(Regex("^(a|ad|al|alla|per)\\s+"), ""), d.app))
+                }
+            }
+            is Dialog.PickContact -> {
+                val c = pickOption(text, d.options.map { it.name })?.let { d.options[it] }
+                when {
+                    c != null -> {
+                        dialogRetry = 0
+                        dialog = null
+                        when (d.purpose) {
+                            "call" -> callContact(c)
+                            "wacall" -> whatsappCallContact(c)
+                            else -> continueCompose(c, d.app, d.text)
+                        }
+                    }
+                    isNo(text) -> endDialog(null)
+                    else -> retryOrDrop(d, "Quale? " + d.options.joinToString(" o ") { it.name } + "?", false)
+                }
+            }
+            is Dialog.AskPlace -> {
+                if (text.isBlank()) retryOrDrop(d, "Dove ti porto?", false)
+                else if (isNo(text)) endDialog(null)
+                else {
+                    dialogRetry = 0
+                    dialog = null
+                    val c = CommandParser.parse("portami a " + CommandParser.normalize(text).replace(Regex("^(a|al|alla|in|da|verso)\\s+"), ""))
+                    execute(if (c is Command.Navigate) c.copy(waze = d.waze) else c)
+                }
+            }
+            is Dialog.PickPlace -> {
+                val i = pickOption(text, d.options.map { it.name })
+                when {
+                    i != null -> {
+                        dialogRetry = 0
+                        dialog = null
+                        val p = d.options[i]
+                        if (p.lat != null) proposeRoute(p, d.waze) else scope.launch {
+                            val g = NavController.geocodePlace(this@VoiceService, listOf(p.name, p.address).filter { it.isNotBlank() }.joinToString(", "))
+                                ?: NavController.geocodePlace(this@VoiceService, p.address)
+                            if (g == null) say("Non riesco a trovare l'indirizzo di ${p.name}.")
+                            else proposeRoute(p.copy(lat = g.lat, lng = g.lng, address = p.address.ifBlank { g.address }), d.waze)
+                        }
+                    }
+                    isNo(text) -> endDialog(null)
+                    else -> retryOrDrop(d, "Quale scegli? " + ordinalList(d.options.size) + "?", false)
+                }
+            }
+            is Dialog.ConfirmRoute -> when (yesNo(text) ?: (if (Regex("^(partiamo|parti|vai|andiamo|avvia)").containsMatchIn(CommandParser.normalize(text))) true else null)) {
+                true -> {
+                    dialog = null
+                    dialogRetry = 0
+                    startRoute(d.place, d.waze)
+                }
+                false -> {
+                    NavController.cancelPreview()
+                    endDialog(null)
+                }
+                null -> if (dialogRetry < 1) retryOrDrop(d, "Partiamo?") else {
+                    dialog = null
+                    dialogRetry = 0
+                    say(if (d.waze) "Lascio stare." else "Il percorso è pronto: di' partiamo quando vuoi.")
+                }
+            }
+            is Dialog.PickRadio -> {
+                val i = pickOption(text, d.options)
+                when {
+                    i != null -> {
+                        dialog = null
+                        dialogRetry = 0
+                        playRadio(d.options[i])
+                        endCommand()
+                    }
+                    isNo(text) -> endDialog(null)
+                    text.isNotBlank() && dialogRetry >= 1 -> {
+                        dialog = null
+                        playRadio(CommandParser.normalize(text).removePrefix("radio ").trim())
+                        endCommand()
+                    }
+                    else -> retryOrDrop(d, "Quale metto? " + ordinalList(d.options.size) + "?", false)
+                }
+            }
         }
+    }
+
+    private fun isNo(text: String) = text.isNotBlank() && yesNo(text) == false
+
+    private fun ordinalList(n: Int) = listOf("la prima", "la seconda", "la terza", "la quarta").take(n).let {
+        if (it.size <= 1) it.joinToString() else it.dropLast(1).joinToString(", ") + " o " + it.last()
+    }
+
+    /** Scelta tra opzioni lette a voce: «la seconda», «il primo», «tre», oppure il nome (anche detto a metà). */
+    private fun pickOption(text: String, names: List<String>): Int? {
+        val t = CommandParser.normalize(text)
+        if (t.isBlank()) return null
+        val ord = listOf(
+            Regex("\\b(prim[oa]|uno|una|1)\\b"),
+            Regex("\\b(second[oa]|due|2)\\b"),
+            Regex("\\b(terz[oa]|tre|3)\\b"),
+            Regex("\\b(quart[oa]|quattro|4)\\b"),
+        )
+        ord.forEachIndexed { i, r -> if (i < names.size && r.containsMatchIn(t)) return i }
+        if (Regex("\\b(ultim[oa])\\b").containsMatchIn(t)) return names.lastIndex
+        val words = normName(t).split(" ").filter { it.length >= 3 }
+        var best = -1
+        var bestScore = 0
+        names.forEachIndexed { i, n ->
+            val nw = normName(n).split(" ")
+            val score = words.count { w -> nw.any { tokenMatch(w, it) } }
+            if (score > bestScore) { bestScore = score; best = i }
+        }
+        return if (bestScore > 0) best else null
     }
 
     private fun wantsChange(text: String): Boolean =
@@ -560,18 +717,25 @@ class VoiceService : Service() {
     private fun announce(m: IncomingMessage) {
         dialogRetry = 0
         dialog = Dialog.AskRead(m)
-        ask("Messaggio in arrivo da ${who(m)}. Vuoi che lo legga?")
+        ask("Messaggio da ${who(m)}. Lo leggo?")
+    }
+
+    /** Lettura richiesta da te: niente «lo leggo?», direttamente il testo. */
+    private fun readNow(m: IncomingMessage, intro: String?) {
+        dialogRetry = 0
+        dialog = Dialog.AskReply(m)
+        ask((intro?.let { "$it " } ?: "") + "Da ${who(m)}: ${m.text}. Vuoi rispondere?")
     }
 
     /** Passa al prossimo messaggio in coda, se non sei già impegnato con un altro. */
     private fun nextPendingMessage() {
         if (dialog != null || listeningCommand || speaker.speaking || Hub.incomingCall.value != null) return
-        val (m, nameOnly) = pendingMessages.removeFirstOrNull() ?: return
+        val (m, how) = pendingMessages.removeFirstOrNull() ?: return
         if (Hub.messages.value.none { it.key == m.key }) return nextPendingMessage()
-        if (nameOnly) {
-            say("Messaggio da ${who(m)}.") { main.postDelayed({ nextPendingMessage() }, 800) }
-        } else {
-            announce(m)
+        when (how) {
+            NAME_ONLY -> say("Messaggio da ${who(m)}.") { main.postDelayed({ nextPendingMessage() }, 800) }
+            READ_NOW -> readNow(m, null)
+            else -> announce(m)
         }
     }
 
@@ -673,7 +837,13 @@ class VoiceService : Service() {
             }
             Command.HangUp -> if (Hub.incomingCall.value != null || inCall()) answerCall(false) else say("Non c'è nessuna chiamata.")
             is Command.SendMessage -> startCompose(cmd)
-            Command.ReadMessages -> readMessages()
+            is Command.ReadMessages -> readMessages(cmd.app, cmd.onlyLast)
+            is Command.SearchNearby -> searchNearby(cmd.query, cmd.best, false)
+            Command.LocalRadio -> localRadio()
+            Command.Go -> when {
+                NavController.startPreview() -> speaker.beep(25)
+                else -> say("Non c'è un percorso pronto. Dimmi dove andare.")
+            }
             Command.Reply -> if (Hub.incomingCall.value != null) answerCall(true) else {
                 val m = Hub.messages.value.lastOrNull { it.replyIntent != null }
                 if (m == null) say("Non ci sono messaggi a cui rispondere.") else {
@@ -695,7 +865,7 @@ class VoiceService : Service() {
             Command.WhereIsCar -> whereIsCar()
             Command.FindFuel -> {
                 bringToFront(Screen.FUEL)
-                say("Cerco i distributori più economici qui vicino.")
+                say("Ecco i distributori più economici.")
             }
             is Command.AddToBar -> editBar(cmd.app, add = true)
             is Command.RemoveFromBar -> editBar(cmd.app, add = false)
@@ -722,7 +892,7 @@ class VoiceService : Service() {
                     say("Ti avviso dieci minuti prima della scadenza, quindi dimmi un tempo più lungo di dieci minuti.")
                 } else {
                     Car.setReminder(applicationContext, cmd.minutes)
-                    say("Va bene, ti avviso dieci minuti prima della scadenza.")
+                    say("Ti avviso dieci minuti prima della scadenza.")
                 }
             }
             Command.CameraAhead -> {
@@ -736,14 +906,23 @@ class VoiceService : Service() {
             is Command.SetPref -> setPref(cmd.key, cmd.value)
             Command.Time -> say("Sono le " + java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("H:mm")) + ".")
             Command.Battery -> battery()
-            Command.Cancel -> say("Va bene.")
+            Command.Cancel -> speaker.beep(25)
             Command.CloseApp -> say("Chiudo Tachimetro.") { Hub.send(UiAction.Close) }
             is Command.AskGemini -> askGemini(cmd.question)
-            is Command.Unknown -> say("Non ho capito: ${cmd.heard}.")
+            is Command.Unknown -> {
+                dialogRetry = 0
+                dialog = Dialog.Repeat
+                ask("Non ho capito, ripeti.")
+            }
         }
     }
 
     private fun navigate(cmd: Command.Navigate) {
+        if (cmd.place.isBlank()) {
+            dialogRetry = 0
+            dialog = Dialog.AskPlace(cmd.waze)
+            return ask("Dove ti porto?")
+        }
         when (cmd.place) {
             "@macchina" -> return whereIsCar()
             "@distributore" -> {
@@ -752,20 +931,13 @@ class VoiceService : Service() {
                     bringToFront(Screen.FUEL)
                     say("Prima cerco i distributori.")
                 } else {
-                    Hub.send(UiAction.NavigateCoords(f.lat, f.lng, f.name, cmd.waze))
-                    bringToFront(Screen.DASHBOARD)
-                    say("Ti porto da ${f.name}.")
+                    proposeRoute(Place(f.name, "", f.lat, f.lng), cmd.waze)
                 }
                 return
             }
             "@appuntamento" -> {
-                val loc = nextAppointmentPlace()
-                if (loc == null) say("Non trovo appuntamenti con un indirizzo nelle prossime ore.") else {
-                    Hub.send(UiAction.NavigateTo(loc, cmd.waze))
-                    bringToFront(Screen.DASHBOARD)
-                    say("Ti porto al prossimo appuntamento.")
-                }
-                return
+                val loc = nextAppointmentPlace() ?: return say("Non trovo appuntamenti con un indirizzo nelle prossime ore.")
+                return findAndPropose(loc, "il prossimo appuntamento", cmd.waze)
             }
         }
         val place = when (cmd.place) {
@@ -773,14 +945,194 @@ class VoiceService : Service() {
             "@lavoro" -> settings.work.ifBlank { return say("Non hai ancora impostato l'indirizzo del lavoro.") }
             else -> cmd.place
         }
-        Hub.send(UiAction.NavigateTo(place, cmd.waze))
-        bringToFront(Screen.DASHBOARD)
         val nice = when (cmd.place) {
-            "@casa" -> "casa"
-            "@lavoro" -> "il lavoro"
-            else -> place
+            "@casa" -> "Casa"
+            "@lavoro" -> "Lavoro"
+            else -> null
         }
-        say(if (cmd.waze) "Apro Waze verso $nice." else "Calcolo il percorso verso $nice.")
+        // «ufficio postale in via Marmorata»: un tipo di posto vicino a un indirizzo
+        if (nice == null && Places.isCategory(place)) return findPoi(place, cmd.waze)
+        findAndPropose(place, nice, cmd.waze)
+    }
+
+    /** Cerca un indirizzo e propone il percorso. */
+    private fun findAndPropose(query: String, nice: String?, waze: Boolean) {
+        Hub.voice.value = Hub.voice.value.copy(phase = VoicePhase.THINKING)
+        scope.launch {
+            val g = NavController.geocodePlace(this@VoiceService, query)
+            if (g == null) {
+                say("Non trovo $query.")
+            } else {
+                proposeRoute(if (nice != null) g.copy(name = nice) else g, waze)
+            }
+        }
+    }
+
+    /** Un tipo di posto, eventualmente vicino a una via: «ufficio postale in via Marmorata», «farmacia a Trastevere». */
+    private fun findPoi(query: String, waze: Boolean) {
+        val split = Regex("^(.+?)\\s+(in|a|ad|di|vicino a|vicino al|vicino alla|presso|dalle parti di|zona)\\s+(.+)$").find(query)
+        val what = split?.groupValues?.get(1) ?: query
+        val near = split?.groupValues?.get(3)
+        Hub.voice.value = Hub.voice.value.copy(phase = VoicePhase.THINKING)
+        scope.launch {
+            try {
+                val center = if (near != null) NavController.geocodePlace(this@VoiceService, near) else null
+                val lat = center?.lat ?: Hub.location.value?.latitude ?: return@launch say("Non ho ancora la tua posizione.")
+                val lng = center?.lng ?: Hub.location.value?.longitude ?: return@launch say("Non ho ancora la tua posizione.")
+                var found = Places.filterFor(what)?.let { Places.nearest(it, lat, lng, 1) }.orEmpty()
+                if (found.isEmpty() && settings.geminiKey.isNotBlank() && !Gemini.searchUnavailable) {
+                    found = try {
+                        Gemini.places(settings.geminiKey, query, false, lat, lng, null).take(1)
+                    } catch (e: Gemini.GeminiException) {
+                        Hub.geminiError.value = e.detail
+                        emptyList()
+                    }
+                }
+                val p = found.firstOrNull()
+                if (p == null) {
+                    // non trovo il posto: almeno l'indirizzo
+                    if (center != null) proposeRoute(center, waze) else say("Non trovo $query.")
+                } else if (p.lat == null) {
+                    val g = NavController.geocodePlace(this@VoiceService, listOf(p.name, p.address).joinToString(", "))
+                    if (g == null) say("Non trovo $query.") else proposeRoute(p.copy(lat = g.lat, lng = g.lng), waze)
+                } else {
+                    proposeRoute(p, waze)
+                }
+            } catch (e: Exception) {
+                say("Non riesco a cercare $query in questo momento.")
+            }
+        }
+    }
+
+    /** Mostra il percorso sulla mappa e chiede se partire. */
+    private fun proposeRoute(p: Place, waze: Boolean) {
+        val lat = p.lat ?: return say("Non trovo ${p.name}.")
+        val lng = p.lng ?: return say("Non trovo ${p.name}.")
+        val label = listOf(p.name, p.address).filter { it.isNotBlank() }.distinct().joinToString(", ")
+        dialogRetry = 0
+        if (waze) {
+            dialog = Dialog.ConfirmRoute(p, true)
+            return ask("$label. Parto con Waze?")
+        }
+        bringToFront(Screen.DASHBOARD)
+        val ready = NavController.preview(lat, lng, p.name) { r ->
+            main.post {
+                when {
+                    r == null -> say("Non trovo un percorso per $label.")
+                    r.first == 0 -> {
+                        dialog = Dialog.ConfirmRoute(p, false)
+                        ask("$label. Partiamo?")
+                    }
+                    else -> {
+                        dialog = Dialog.ConfirmRoute(p, false)
+                        ask("$label: ${durationWords(r.first)}, ${Places.spokenDistance(r.second)}. Partiamo?")
+                    }
+                }
+            }
+        }
+        if (!ready) {
+            dialog = Dialog.ConfirmRoute(p, false)
+            ask("$label. Partiamo?")
+        }
+    }
+
+    private fun durationWords(min: Int): String = when {
+        min < 60 -> if (min == 1) "un minuto" else "$min minuti"
+        min % 60 == 0 -> if (min == 60) "un'ora" else "${min / 60} ore"
+        else -> (if (min / 60 == 1) "un'ora" else "${min / 60} ore") + " e ${min % 60} minuti"
+    }
+
+    private fun startRoute(p: Place, waze: Boolean) {
+        val lat = p.lat ?: return
+        val lng = p.lng ?: return
+        if (waze) {
+            NavController.cancelPreview()
+            NavController.openWaze(this, null, lat, lng, p.name)
+        } else if (!NavController.startPreview()) {
+            NavController.go(this, lat, lng, p.name)
+        }
+        speaker.beep(25)
+        endCommand()
+    }
+
+    // ---------------- ricerca di posti vicini ----------------
+
+    private fun searchNearby(query: String, best: Boolean, waze: Boolean) {
+        val loc = Hub.location.value ?: return say("Non ho ancora la tua posizione.")
+        say("Cerco.")
+        scope.launch {
+            var list: List<Place> = emptyList()
+            var fromGoogle = false
+            val key = settings.geminiKey
+            if (key.isNotBlank() && !Gemini.searchUnavailable) {
+                try {
+                    list = Gemini.places(key, query, best, loc.latitude, loc.longitude, townOf(loc))
+                    fromGoogle = list.isNotEmpty()
+                } catch (e: Gemini.GeminiException) {
+                    Hub.geminiError.value = e.detail
+                } catch (e: Exception) {
+                }
+            }
+            if (list.isEmpty()) {
+                list = try {
+                    Places.nearest(Places.filterFor(query) ?: Places.nameFilter(query), loc.latitude, loc.longitude)
+                } catch (e: Exception) {
+                    emptyList()
+                }
+            }
+            if (list.isEmpty()) return@launch say("Non trovo $query qui vicino.")
+            if (list.size == 1) {
+                proposeRoute(list.first(), waze)
+                return@launch
+            }
+            val intro = if (best && !fromGoogle) "Senza recensioni a disposizione, ecco i più vicini. " else ""
+            val names = listOf("Primo", "Secondo", "Terzo")
+            val body = list.mapIndexed { i, p ->
+                val parts = listOfNotNull(
+                    p.name,
+                    p.address.ifBlank { null },
+                    p.distanceM?.let { Places.spokenDistance(it) },
+                    p.note,
+                )
+                "${names[i]}: ${parts.joinToString(", ")}."
+            }.joinToString(" ")
+            dialogRetry = 0
+            dialog = Dialog.PickPlace(list, waze)
+            ask("$intro$body Quale scegli?")
+        }
+    }
+
+    private suspend fun townOf(loc: Location): String? = withContext(Dispatchers.IO) {
+        try {
+            @Suppress("DEPRECATION")
+            android.location.Geocoder(this@VoiceService, java.util.Locale.ITALY).getFromLocation(loc.latitude, loc.longitude, 1)
+                ?.firstOrNull()?.let { a -> listOfNotNull(a.subLocality, a.locality).joinToString(", ").ifBlank { null } }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private suspend fun regionOf(loc: Location): String? = withContext(Dispatchers.IO) {
+        try {
+            @Suppress("DEPRECATION")
+            android.location.Geocoder(this@VoiceService, java.util.Locale.ITALY).getFromLocation(loc.latitude, loc.longitude, 1)?.firstOrNull()?.adminArea
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    /** «radio locali»: le stazioni più ascoltate della regione in cui sei, e scegli tu. */
+    private fun localRadio() {
+        scope.launch {
+            val loc = Hub.location.value
+            val region = settings.radioRegion.ifBlank { loc?.let { regionOf(it) }.orEmpty() }
+            if (region.isBlank()) return@launch say("Non so ancora in che regione sei.")
+            val list = try { Radio.regional(region).take(3) } catch (e: Exception) { emptyList() }
+            if (list.isEmpty()) return@launch say("Non trovo radio locali per $region.")
+            dialogRetry = 0
+            dialog = Dialog.PickRadio(list)
+            ask("Radio locali: ${list.dropLast(1).joinToString(", ")}${if (list.size > 1) " e " else ""}${list.last()}. Quale metto?")
+        }
     }
 
     private fun playRadio(spoken: String) {
@@ -805,33 +1157,119 @@ class VoiceService : Service() {
             return say("Per chiamare servono i permessi per contatti e telefono, nelle impostazioni.")
         }
         val digits = name.replace(Regex("[\\s./-]"), "")
-        val found = if (Regex("^\\+?\\d{5,}$").matches(digits)) {
-            name to digits
-        } else {
-            findContact(name) ?: name.split(" ").firstOrNull()?.let { findContact(it) }
+        if (Regex("^\\+?\\d{5,}$").matches(digits)) return callContact(Contact(name, digits))
+        val (found, _) = resolveContact(name.split(" ").filter { it.isNotBlank() })
+        when {
+            found.isEmpty() -> say("Non trovo $name tra i contatti.")
+            found.size == 1 -> callContact(found.first())
+            else -> askWhich(found, "call", null, "")
         }
-        if (found == null) return say("Non trovo $name tra i contatti.")
-        Hub.lastCaller.value = found.first
-        say("Chiamo ${found.first}.") {
+    }
+
+    private fun callContact(c: Contact) {
+        Hub.lastCaller.value = c.name
+        say("Chiamo ${c.name}.") {
             try {
-                startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + found.second)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + c.number)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
             } catch (e: Exception) {
             }
         }
     }
 
-    private fun findContact(name: String): Pair<String, String>? {
-        val uri = ContactsContract.CommonDataKinds.Phone.CONTENT_URI
-        val proj = arrayOf(ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME, ContactsContract.CommonDataKinds.Phone.NUMBER)
-        return try {
+    private fun askWhich(options: List<Contact>, purpose: String, app: String?, text: String) {
+        dialogRetry = 0
+        dialog = Dialog.PickContact(options, purpose, app, text)
+        ask(options.joinToString(" o ") { it.name } + "?")
+    }
+
+    // ---------------- rubrica: nomi capiti a voce ----------------
+
+    private var contactCache: List<Contact>? = null
+    private var contactCacheAt = 0L
+
+    /** Tutti i contatti con un numero, uno per nome (preferendo il cellulare o il numero principale). */
+    private fun allContacts(): List<Contact> {
+        val now = System.currentTimeMillis()
+        contactCache?.let { if (now - contactCacheAt < 10 * 60_000L) return it }
+        val P = ContactsContract.CommonDataKinds.Phone
+        val out = LinkedHashMap<String, Pair<Contact, Int>>()
+        try {
             contentResolver.query(
-                uri, proj,
-                ContactsContract.CommonDataKinds.Phone.DISPLAY_NAME + " LIKE ?", arrayOf("%$name%"),
-                ContactsContract.CommonDataKinds.Phone.IS_PRIMARY + " DESC",
-            )?.use { c -> if (c.moveToFirst()) c.getString(0) to c.getString(1) else null }
+                P.CONTENT_URI,
+                arrayOf(P.DISPLAY_NAME, P.NUMBER, P.IS_PRIMARY, P.TYPE),
+                null, null, null,
+            )?.use { c ->
+                while (c.moveToNext()) {
+                    val name = c.getString(0)?.trim().orEmpty()
+                    val num = c.getString(1)?.trim().orEmpty()
+                    if (name.isBlank() || num.isBlank()) continue
+                    val rank = (if (c.getInt(2) != 0) 2 else 0) + (if (c.getInt(3) == P.TYPE_MOBILE) 1 else 0)
+                    val cur = out[name]
+                    if (cur == null || rank > cur.second) out[name] = Contact(name, num) to rank
+                }
+            }
         } catch (e: Exception) {
-            null
         }
+        return out.values.map { it.first }.also {
+            contactCache = it
+            contactCacheAt = now
+        }
+    }
+
+    /** Nome semplificato per il confronto: senza accenti e simboli, con C e K, doppie e H trattate allo stesso modo. */
+    private fun normName(s: String): String = java.text.Normalizer.normalize(s.lowercase(), java.text.Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .replace("k", "c").replace("y", "i").replace("j", "i").replace("w", "v").replace("h", "")
+        .replace(Regex("[^a-z0-9 ]"), " ")
+        .replace(Regex("(.)\\1+"), "$1")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    private fun tokenMatch(a: String, b: String): Boolean {
+        if (a == b) return true
+        if (a.length >= 4 && b.length >= 4 && distance(a, b) <= 1) return true
+        // nome detto a metà, per esempio «Ale» per «Alessandro»
+        return a.length >= 3 && b.startsWith(a) && b.length - a.length <= 4
+    }
+
+    private fun distance(a: String, b: String): Int {
+        if (kotlin.math.abs(a.length - b.length) > 1) return 2
+        val d = IntArray(b.length + 1) { it }
+        for (i in 1..a.length) {
+            var prev = d[0]
+            d[0] = i
+            for (j in 1..b.length) {
+                val tmp = d[j]
+                d[j] = minOf(d[j] + 1, d[j - 1] + 1, prev + if (a[i - 1] == b[j - 1]) 0 else 1)
+                prev = tmp
+            }
+        }
+        return d[b.length]
+    }
+
+    /** Contatti in cui compaiono tutte le parole dette, i più somiglianti per primi. */
+    private fun matchContacts(spoken: String): List<Contact> {
+        val q = normName(spoken).split(" ").filter { it.isNotBlank() }
+        if (q.isEmpty()) return emptyList()
+        val scored = allContacts().mapNotNull { c ->
+            val ct = normName(c.name).split(" ").filter { it.isNotBlank() }
+            if (ct.isEmpty()) return@mapNotNull null
+            if (!q.all { w -> ct.any { tokenMatch(w, it) } }) return@mapNotNull null
+            val exact = q.count { w -> ct.any { it == w } }
+            c to (exact * 10 + q.size * 10 - (ct.size - q.size).coerceAtLeast(0) * 3)
+        }.sortedByDescending { it.second }
+        if (scored.isEmpty()) return emptyList()
+        val top = scored.first().second
+        return scored.filter { it.second == top }.map { it.first }.take(3)
+    }
+
+    /** Cerca il nome più lungo all'inizio della frase: restituisce i contatti trovati e quante parole erano il nome. */
+    private fun resolveContact(words: List<String>): Pair<List<Contact>, Int> {
+        for (n in minOf(4, words.size) downTo 1) {
+            val found = matchContacts(words.take(n).joinToString(" "))
+            if (found.isNotEmpty()) return found to n
+        }
+        return emptyList<Contact>() to 0
     }
 
     // ---------------- messaggi dettati ----------------
@@ -840,27 +1278,28 @@ class VoiceService : Service() {
     private fun startCompose(cmd: Command.SendMessage) {
         if (!granted(Manifest.permission.READ_CONTACTS)) return say("Per scrivere ai contatti serve il permesso per i contatti, nelle impostazioni.")
         val words = cmd.rest.split(" ").filter { it.isNotBlank() }
-        var to: Contact? = null
-        var used = 0
-        for (n in minOf(4, words.size) downTo 1) {
-            val f = findContact(words.take(n).joinToString(" "))
-            if (f != null) {
-                to = Contact(f.first, f.second)
-                used = n
-                break
-            }
+        if (words.isEmpty()) {
+            dialogRetry = 0
+            dialog = Dialog.ComposeTo(cmd.app)
+            return ask("A chi scrivo?")
         }
-        if (to == null) return say("Non trovo ${words.take(2).joinToString(" ")} tra i contatti.")
+        val (found, used) = resolveContact(words)
+        if (found.isEmpty()) return say("Non trovo ${words.take(2).joinToString(" ")} tra i contatti.")
         val text = words.drop(used).joinToString(" ")
-            .replace(Regex("^(che|dicendo che|dicendogli che|dicendole che|dicendo|di|e digli che|e dille che|scrivendo)\\s+"), "")
+            .replace(Regex("^(che|dicendo che|dicendogli che|dicendole che|dicendo|di|e digli che|e dille che|e scrivi|scrivendo|con scritto|il messaggio)\\s+"), "")
             .trim()
+        if (found.size > 1) return askWhich(found, "msg", cmd.app, text)
+        continueCompose(found.first(), cmd.app, text)
+    }
+
+    private fun continueCompose(to: Contact, appSaid: String?, text: String) {
         // l'app: quella detta, altrimenti quella dell'ultimo messaggio ricevuto da questa persona, altrimenti quella preferita
         val recent = Hub.messages.value.lastOrNull { it.group == null && sameName(it.sender, to.name) }
-        val app = cmd.app ?: recent?.app?.lowercase() ?: settings.msgApp
+        val app = appSaid ?: recent?.app?.lowercase() ?: settings.msgApp
         dialogRetry = 0
         if (app == "ask") {
             dialog = Dialog.ComposeApp(to, text)
-            ask("Scrivo a ${to.name} su WhatsApp o con SMS?")
+            ask("Su WhatsApp o con SMS?")
         } else {
             composeNext(to, app, text)
         }
@@ -920,11 +1359,10 @@ class VoiceService : Service() {
                 dialog = null
                 dialogRetry = 0
                 if (auto) {
-                    say("Invio.") {
-                        if (!WhatsAppSender.open(this, phone, text, true)) {
-                            say("WhatsApp non è installato.")
-                            return@say
-                        }
+                    speaker.beep(25)
+                    if (!WhatsAppSender.open(this, phone, text, true)) {
+                        say("WhatsApp non è installato.")
+                    } else {
                         main.postDelayed({
                             if (!WhatsAppSender.lastResult) {
                                 bringToFront()
@@ -934,6 +1372,7 @@ class VoiceService : Service() {
                             }
                         }, 11_000)
                     }
+                    endCommand()
                 } else {
                     say("Ho preparato il messaggio nella chat di WhatsApp: tocca Invia.") {
                         if (!WhatsAppSender.open(this, phone, text, false)) say("WhatsApp non è installato.")
@@ -956,24 +1395,33 @@ class VoiceService : Service() {
 
     private fun whatsappCall(name: String) {
         if (!granted(Manifest.permission.READ_CONTACTS)) return say("Per chiamare serve il permesso per i contatti, nelle impostazioni.")
+        val (found, _) = resolveContact(name.split(" ").filter { it.isNotBlank() })
+        when {
+            found.isEmpty() -> say("Non trovo $name tra i contatti.")
+            found.size == 1 -> whatsappCallContact(found.first())
+            else -> askWhich(found, "wacall", null, "")
+        }
+    }
+
+    private fun whatsappCallContact(c: Contact) {
         val mime = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
-        val row = try {
+        val id = try {
             contentResolver.query(
                 ContactsContract.Data.CONTENT_URI,
-                arrayOf(ContactsContract.Data._ID, ContactsContract.Data.DISPLAY_NAME),
-                ContactsContract.Data.MIMETYPE + " = ? AND " + ContactsContract.Data.DISPLAY_NAME + " LIKE ?",
-                arrayOf(mime, "%$name%"),
+                arrayOf(ContactsContract.Data._ID),
+                ContactsContract.Data.MIMETYPE + " = ? AND " + ContactsContract.Data.DISPLAY_NAME + " = ?",
+                arrayOf(mime, c.name),
                 null,
-            )?.use { c -> if (c.moveToFirst()) c.getLong(0) to c.getString(1) else null }
+            )?.use { cur -> if (cur.moveToFirst()) cur.getLong(0) else null }
         } catch (e: Exception) {
             null
-        } ?: return say("Non trovo $name su WhatsApp.")
-        Hub.lastCaller.value = row.second
-        say("Chiamo ${row.second} su WhatsApp.") {
+        } ?: return say("${c.name} non risulta su WhatsApp.")
+        Hub.lastCaller.value = c.name
+        say("Chiamo ${c.name} su WhatsApp.") {
             try {
                 startActivity(
                     Intent(Intent.ACTION_VIEW)
-                        .setDataAndType(Uri.withAppendedPath(ContactsContract.Data.CONTENT_URI, row.first.toString()), mime)
+                        .setDataAndType(Uri.withAppendedPath(ContactsContract.Data.CONTENT_URI, id.toString()), mime)
                         .setPackage("com.whatsapp")
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
                 )
@@ -1157,12 +1605,21 @@ class VoiceService : Service() {
         say("Batteria al $pct per cento$extra.")
     }
 
-    private fun readMessages() {
-        val list = Hub.messages.value
-        if (list.isEmpty()) return say("Nessun messaggio nuovo.")
+    private fun readMessages(app: String?, onlyLast: Boolean) {
+        val all = Hub.messages.value.filter { app == null || it.app == app }
+        val where = app?.let { " su $it" } ?: ""
+        if (all.isEmpty()) {
+            return say(if (NotificationReader.connected) "Nessun messaggio nuovo$where." else "Per leggere i messaggi attiva la lettura delle notifiche nelle impostazioni.")
+        }
+        val list = if (onlyLast) listOf(all.last()) else all
         pendingMessages.clear()
-        list.drop(1).forEach { pendingMessages.addLast(it to false) }
-        announce(list.first())
+        list.drop(1).forEach { pendingMessages.addLast(it to READ_NOW) }
+        val intro = if (list.size > 1) "${numberWord(list.size)} messaggi$where." else null
+        readNow(list.first(), intro)
+    }
+
+    private fun numberWord(n: Int) = when (n) {
+        2 -> "Due"; 3 -> "Tre"; 4 -> "Quattro"; 5 -> "Cinque"; else -> n.toString()
     }
 
     private fun onMessages(list: List<IncomingMessage>) {
@@ -1175,12 +1632,12 @@ class VoiceService : Service() {
                 when (settings.groupMode) {
                     "never" -> continue
                     "name" -> {
-                        pendingMessages.addLast(m to true)
+                        pendingMessages.addLast(m to NAME_ONLY)
                         continue
                     }
                 }
             }
-            pendingMessages.addLast(m to false)
+            pendingMessages.addLast(m to ANNOUNCE)
         }
         if (announced.size > 300) announced.clear()
         nextPendingMessage()
@@ -1338,6 +1795,11 @@ class VoiceService : Service() {
         const val ACTION_LISTEN = "it.giacomo.tachimetro.LISTEN"
         const val ACTION_SAY = "it.giacomo.tachimetro.SAY"
         const val EXTRA_TEXT = "text"
+        /** Quanto aspetta in silenzio prima di considerare finita la frase. */
+        private const val PAUSE_MS = 3000L
+        private const val ANNOUNCE = 0
+        private const val NAME_ONLY = 1
+        private const val READ_NOW = 2
 
         @Volatile
         var running = false

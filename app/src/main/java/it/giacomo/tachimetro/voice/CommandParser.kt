@@ -1,5 +1,7 @@
 package it.giacomo.tachimetro.voice
 
+import it.giacomo.tachimetro.data.Places
+
 /** Cosa ha chiesto la persona, ricavato dalla frase detta dopo «Ehi Tachi». */
 sealed interface Command {
     data class Navigate(val place: String, val waze: Boolean) : Command
@@ -28,7 +30,10 @@ sealed interface Command {
     data object Time : Command
     data class WeatherAt(val place: String?) : Command
     data object Battery : Command
-    data object ReadMessages : Command
+    data class ReadMessages(val app: String?, val onlyLast: Boolean) : Command
+    data class SearchNearby(val query: String, val best: Boolean) : Command
+    data object LocalRadio : Command
+    data object Go : Command
     data object Reply : Command
     data object JoinMeeting : Command
     data class OpenApp(val name: String) : Command
@@ -62,14 +67,40 @@ object CommandParser {
         .replace(Regex("\\s+"), " ")
         .trim()
         .replace(Regex("^(ehi|hey|hei|ei|e|ok)\\s+(tachi|tacchi|taxi|taki|ta chi)\\s*"), "")
+        // come il riconoscimento vocale scrive a volte WhatsApp e SMS
+        .replace(Regex("\\b(whats app|what's app|what s app|watsapp|wazap|wassap|whatsup|whatsapp's|uotsapp|uazzap)\\b"), "whatsapp")
+        .replace(Regex("\\b(esse emme esse|s m s|esseemmeesse)\\b"), "sms")
+        .replace(Regex("\\b(in streaming|via streaming|in diretta|online|on line)\\b"), "")
+        .replace(Regex("\\s+"), " ")
         .trim()
+
+    /** Modi gentili o indiretti di chiedere: «mi puoi chiamare Luca» diventa «chiama Luca». */
+    private val POLITE = Regex("^(per favore|per piacere|per cortesia|mi puoi|mi potresti|puoi|potresti|riesci a|ti chiedo di|vorrei che|fammi il piacere di)\\s+")
+    private val INFINITIVE = mapOf(
+        "chiamare" to "chiama", "telefonare" to "telefona", "mandare" to "manda", "inviare" to "invia",
+        "scrivere" to "scrivi", "leggere" to "leggi", "leggermi" to "leggimi", "cercare" to "cerca", "cercarmi" to "cercami",
+        "trovare" to "trova", "trovarmi" to "trovami", "mettere" to "metti", "portarmi" to "portami", "aprire" to "apri",
+        "impostare" to "imposta", "impostarmi" to "impostami", "accendere" to "accendi", "spegnere" to "spegni",
+        "rispondere" to "rispondi", "richiamare" to "richiama", "salvare" to "salva", "ricordarmi" to "ricordami",
+    )
+
+    private fun polish(t: String): String {
+        var x = t
+        repeat(2) { x = x.replace(POLITE, "") }
+        x = x.replace(Regex("\\s+(per favore|per piacere|per cortesia|grazie)$"), "")
+        val first = x.substringBefore(" ")
+        INFINITIVE[first]?.let { x = it + x.removePrefix(first) }
+        return x.trim()
+    }
 
     /** Pezzi della parola chiave che a volte restano all'inizio del comando («chi metti la radio»). */
     private val RESIDUE = setOf("ehi", "hey", "hei", "ei", "e", "ok", "chi", "ki", "ci", "ta", "taki", "tachi", "tacchi", "taxi")
 
     private val QUESTION = Regex(
-        "^(chi|cosa|che|come|quando|dove|quanto|quanti|quanta|quante|perché|perche|qual|quale|quali|dimmi|spiegami|sai|mi sai|raccontami|chiedi)\\b",
+        "^(chi|cosa|che|come|quando|dove|quanto|quanti|quanta|quante|perché|perche|qual|quale|quali|dimmi|spiegami|sai|mi sai|raccontami|chiedi|cerca|trova)\\b",
     )
+
+    private const val NEAR = "(nelle vicinanze|qui vicino|qua vicino|vicino a me|qui intorno|nei dintorni|nei paraggi|in zona|da queste parti|più vicin[oaie])"
 
     fun parse(raw: String): Command {
         val base = normalize(raw)
@@ -77,10 +108,13 @@ object CommandParser {
         // prima la frase così com'è, poi senza gli eventuali resti di «Ehi Tachi» all'inizio
         val words = base.split(" ")
         val candidates = mutableListOf(base)
+        polish(base).let { if (it != base) candidates += it }
         var i = 0
         while (i < words.size - 1 && i < 3 && words[i] in RESIDUE) {
             i++
-            candidates += words.drop(i).joinToString(" ")
+            val c = words.drop(i).joinToString(" ")
+            candidates += c
+            polish(c).let { if (it != c) candidates += it }
         }
         for (c in candidates) tryCommand(c)?.let { return it }
         Regex("^chiedi a gemini\\s+(.+)$").find(base)?.let { return Command.AskGemini(it.groupValues[1]) }
@@ -112,6 +146,8 @@ object CommandParser {
         Regex("^come (arrivo|si arriva|vado|ci arrivo) (a|al|alla|allo|in|da) (.+)$").find(t)?.let {
             return navigateTo(it.groupValues[3])
         }
+        if (Regex("^(ok |sì |si |va bene )?(partiamo|parti|si parte|andiamo|vai|avvia|avvia la navigazione|inizia la navigazione|avvia il percorso)$").matches(t)) return Command.Go
+        if (Regex("^(portami|naviga|navigatore|navigazione|imposta (il |un )?percorso|imposta la navigazione|voglio andare|portami da qualche parte)$").matches(t)) return Command.Navigate("", false)
         if (Regex("^(torna a|usa) (google )?maps").containsMatchIn(t)) return Command.BackToMaps
         if (Regex("(ferma|termina|interrompi|chiudi) (la )?navigazione").containsMatchIn(t)) return Command.StopNavigation
         Regex("^(portami|guidami|naviga|vai|andiamo|voglio andare)\\s+(verso |a |al |alla |allo |ai |alle |all'|in |da |dal |dalla )?(.+)$").find(t)?.let { m ->
@@ -121,6 +157,7 @@ object CommandParser {
                 waze = true
                 place = place.removeRange(it.range).trim()
             }
+            if (!waze && looksNearby(place)) return Command.SearchNearby(cleanPlaceQuery(place), place.contains("miglior"))
             return Command.Navigate(normalizePlace(m.groupValues[2], place), waze)
         }
 
@@ -184,32 +221,29 @@ object CommandParser {
         Regex("^(togli|rimuovi|leva) (.+?) dalla barra").find(t)?.let { return Command.RemoveFromBar(it.groupValues[2]) }
 
         // messaggi e chiamate
-        if (Regex("(leggi|leggimi) (i |il )?(messaggi|messaggio|ultimo)").containsMatchIn(t)) return Command.ReadMessages
+        if (Regex("^(leggi|leggimi|rileggi|rileggimi|fammi sentire|dimmi|ripeti)( mi)?( tutti)? ?(gli |i |il |l'|l |le |un |ultim)?").containsMatchIn(t) &&
+            Regex("\\b(messaggi|messaggio|messaggini|notifiche|sms|whatsapp|chat|teams|scritto)\\b").containsMatchIn(t) &&
+            !Regex("^(dimmi|ripeti) (chi|cosa|che|come|quando|dove|quanto)").containsMatchIn(t)
+        ) return Command.ReadMessages(messageApp(t), onlyLast(t))
+        if (Regex("^(ci sono|ho|hai) (dei |nuovi |altri )?(messaggi|notifiche)|^chi mi ha scritto|^novità su (whatsapp|teams|sms)|^(nuovi )?messaggi( nuovi)?$").containsMatchIn(t)) {
+            return Command.ReadMessages(messageApp(t), false)
+        }
         if (Regex("^(metti giù|metti giu|riaggancia|chiudi la chiamata|termina la chiamata|rifiuta( la chiamata)?)$").containsMatchIn(t)) return Command.HangUp
         if (Regex("^rispondi").containsMatchIn(t)) return Command.Reply
         if (Regex("(entra|partecipa|collegami)( nella| alla)? riunione").containsMatchIn(t)) return Command.JoinMeeting
         if (Regex("^richiama( l'ultimo| l ultimo)?( numero| chiamata)?$").containsMatchIn(t)) return Command.CallBack
-        Regex("^(manda|invia|scrivi|mandagli|scrivigli)( un| il)? ?(messaggio whatsapp|messaggio|sms|whatsapp)? ?(a|ad|per) (.+)$").find(t)?.let { m ->
-            var rest = m.groupValues[5].trim()
-            var app: String? = when {
-                m.groupValues[3].contains("whatsapp") -> "whatsapp"
-                m.groupValues[3] == "sms" -> "sms"
-                else -> null
-            }
-            Regex("\\s(su|con|via|tramite) (whatsapp|sms|teams)\\b").find(rest)?.let { a ->
-                app = a.groupValues[2]
-                rest = rest.removeRange(a.range).trim()
-            }
-            return Command.SendMessage(rest, app)
+        Regex("^(manda|invia|scrivi|mandagli|scrivigli|mandale|scrivile|messaggio)\\b ?(.*)$").find(t)?.let { m ->
+            sendMessage(m.groupValues[1], m.groupValues[2])?.let { return it }
         }
-        Regex("^(chiama|telefona a|fai una chiamata a|videochiama)\\s+(.+)$").find(t)?.let {
+        Regex("^(chiama|telefona a|telefona|fai una chiamata a|fai una telefonata a|videochiama|chiamata whatsapp a|chiamata su whatsapp a|chiamata a)\\s+(.+)$").find(t)?.let {
             var name = it.groupValues[2].trim()
-            var wa = false
-            Regex("\\s(su|con|via) whatsapp$").find(name)?.let { a ->
+            var wa = it.groupValues[1].contains("whatsapp")
+            Regex("\\s?(su|con|via|tramite|in) whatsapp\\b").find(name)?.let { a ->
                 wa = true
                 name = name.removeRange(a.range).trim()
             }
-            return Command.Call(name, wa)
+            name = name.replace(Regex("^(a |ad )"), "").replace(Regex("^(la |il |mia |mio |la mia |il mio )"), "").trim()
+            if (name.isNotBlank()) return Command.Call(name, wa)
         }
 
         // riproduzione
@@ -223,6 +257,8 @@ object CommandParser {
         if (Regex("abbassa (il )?volume|più piano").containsMatchIn(t)) return Command.Volume(false)
 
         // radio
+        if (Regex("\\b(radio|stazioni|emittenti)( radio)? (locali|locale|della zona|di zona|della mia zona|qui vicino|del posto|regionali|regionale|della regione)\\b").containsMatchIn(t)) return Command.LocalRadio
+        Regex("^(cerca|trova|cercami|trovami|metti|ascolta|sintonizza|sintonizzati su)( la| una)? (radio|stazione) (.+)$").find(t)?.let { return Command.PlayRadio(it.groupValues[4].trim()) }
         if (Regex("^(cambia|altra) (radio|stazione)|^radio successiva|^prossima radio").containsMatchIn(t)) return Command.NextRadio
         Regex("^(passa a|passa alla|vai su|metti su) (radio .+)$").find(t)?.let { return Command.PlayRadio(it.groupValues[2].removePrefix("radio ").trim()) }
         Regex("^radio (.+)$").find(t)?.let { return Command.PlayRadio(it.groupValues[1].trim()) }
@@ -233,6 +269,10 @@ object CommandParser {
         Regex("^cerca (.+) su (netflix|prime video|prime|dazn|now|raiplay|hbo max|hbo)$").find(t)?.let {
             return Command.SearchVideo(it.groupValues[1].trim(), it.groupValues[2])
         }
+
+        // posti vicini: «ristorante cinese nelle vicinanze», «il miglior ristorante cinese qui vicino»
+        nearby(t)?.let { return it }
+
 
         // musica: «metti Vasco su Spotify», «metti la playlist viaggio»
         Regex("^(metti|riproduci|suona|fammi sentire|ascolta)\\s+(.+)$").find(t)?.let { m ->
@@ -262,7 +302,75 @@ object CommandParser {
             waze = true
             place = place.removeRange(it.range).trim()
         }
+        if (!waze && looksNearby(place)) return Command.SearchNearby(cleanPlaceQuery(place), place.contains("miglior"))
         return Command.Navigate(normalizePlace("", place), waze)
+    }
+
+    private fun messageApp(t: String): String? = when {
+        t.contains("whatsapp") -> "WhatsApp"
+        Regex("\\bsms\\b|messaggini").containsMatchIn(t) -> "SMS"
+        t.contains("teams") -> "Teams"
+        else -> null
+    }
+
+    private fun onlyLast(t: String): Boolean =
+        Regex("\\b(l'ultimo|l ultimo|ultimo messaggio|il messaggio|un messaggio)\\b").containsMatchIn(t) && !Regex("\\bultimi\\b").containsMatchIn(t)
+
+    /**
+     * «messaggio whatsapp a Catia moglie che arrivo», «un sms a Luca», «a mia moglie su whatsapp dicendo che…».
+     * Il destinatario e il testo li separa poi chi invia, cercando il nome più lungo tra i contatti.
+     */
+    private fun sendMessage(verb: String, after: String): Command? {
+        var rest = (if (verb == "messaggio") "messaggio $after" else after).trim()
+        var app: String? = null
+        val head = Regex("^((un|il|uno|una|l')\\s+)?((messaggio|messaggino|sms|whatsapp)\\s+)?((su|con|via|tramite|per)\\s+(whatsapp|sms|teams)\\s+)?((messaggio|whatsapp|sms)\\s+)?")
+        head.find(rest)?.let { h ->
+            val words = listOf(h.groupValues[4], h.groupValues[7], h.groupValues[9])
+            app = when {
+                "whatsapp" in words -> "whatsapp"
+                "sms" in words -> "sms"
+                "teams" in words -> "teams"
+                else -> null
+            }
+            rest = rest.substring(h.range.last + 1)
+        }
+        // «manda la posizione», «invia la mail» e simili non sono messaggi
+        if (app == null && verb != "messaggio" && !Regex("^(a|ad|al|alla|allo|all'|ai|per)\\b").containsMatchIn(rest) && rest.isNotBlank()) return null
+        rest = rest.replace(Regex("^(a|ad|al|alla|allo|all'|ai|per)\\s*"), "")
+        Regex("\\s(su|con|via|tramite) (whatsapp|sms|teams)\\b").find(" $rest")?.let { a ->
+            app = a.groupValues[2]
+            rest = (" $rest").removeRange(a.range).trim()
+        }
+        rest = rest.replace(Regex("^(la mia |il mio |mia |mio )"), "").trim()
+        return Command.SendMessage(rest, app)
+    }
+
+    private fun looksNearby(place: String): Boolean =
+        Regex("\\b$NEAR\\b").containsMatchIn(place) || place.contains("miglior") ||
+            (Regex("^(un|una|uno|un') ").containsMatchIn(place) && Places.isCategory(place))
+
+    private fun cleanPlaceQuery(q: String): String = q
+        .replace(Regex("\\b(il|la|lo|l')?\\s*$NEAR\\b"), "")
+        .replace(Regex("\\b(il |la |lo |l')?(miglior[ei]?|più buon[oa])\\b"), "")
+        .replace(Regex("^(un|una|uno|un'|il|la|lo|l'|i|le|gli|dei|delle|degli|qualche|al|alla|allo|all')\\s*"), "")
+        .replace(Regex("\\s+"), " ")
+        .trim()
+
+    private fun nearby(t: String): Command? {
+        val best = Regex("\\b(miglior[ei]?|più buon[oa]|più bell[oa]|consigliat[oa]|recensioni)\\b").containsMatchIn(t)
+        val m = Regex("^(cerca|cercami|trova|trovami|consigliami|suggeriscimi|dove posso trovare|dove trovo|dov'è|dove c'è|c'è|ci sono|mi serve|ho bisogno di|qual è|quale è|dimmi)\\s+(.+)$").find(t)
+        val body = m?.groupValues?.get(2) ?: t
+        val near = Regex("\\b$NEAR\\b").containsMatchIn(body)
+        val cat = Places.isCategory(body)
+        // le domande vere («cerca chi ha vinto…») restano a Gemini
+        val question = Regex("^(chi|cosa|che cosa|come|quando|perché|perche|quanto|quanti|quale|quali|se|il significato|notizie|informazioni)\\b").containsMatchIn(body)
+        // «cerca un negozio di scarpe», «dove trovo un ferramenta», «ristorante cinese nelle vicinanze», «il miglior gommista qui vicino»
+        val strong = m != null && Regex("^(cerca|cercami|trova|trovami|consigliami|suggeriscimi|dove posso trovare|dove trovo|mi serve|ho bisogno di)$").matches(m.groupValues[1])
+        if ((strong && !question) || (m != null && !question && (near || cat || best)) || (m == null && (near || (best && cat)))) {
+            val q = cleanPlaceQuery(body)
+            if (q.isNotBlank()) return Command.SearchNearby(q, best)
+        }
+        return null
     }
 
     private val NUM = mapOf(

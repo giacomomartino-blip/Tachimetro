@@ -23,6 +23,7 @@ val mapsKey: String = (System.getenv("MAPS_API_KEY") ?: "").ifBlank { mapsProps.
 val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
 
 android {
+    testOptions { unitTests.isReturnDefaultValues = true }
     namespace = "it.giacomo.tachimetro"
     compileSdk = 36
 
@@ -83,6 +84,7 @@ kotlin {
 }
 
 dependencies {
+    testImplementation("junit:junit:4.13.2")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")

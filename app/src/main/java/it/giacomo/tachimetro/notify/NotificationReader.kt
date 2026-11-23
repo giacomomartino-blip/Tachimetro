@@ -23,6 +23,13 @@ class NotificationReader : NotificationListenerService() {
         connected = true
         instance = this
         MediaSessions.start(applicationContext)
+        // messaggi già arrivati prima di aprire Tachimetro e ancora da leggere
+        try {
+            activeNotifications?.sortedBy { it.postTime }?.forEach { sbn ->
+                if (sbn.notification.category != Notification.CATEGORY_CALL) handle(sbn)
+            }
+        } catch (e: Exception) {
+        }
     }
 
     override fun onListenerDisconnected() {
@@ -32,11 +39,15 @@ class NotificationReader : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val n = sbn.notification
-        if (n.category == Notification.CATEGORY_CALL) {
+        if (sbn.notification.category == Notification.CATEGORY_CALL) {
             onCall(sbn)
             return
         }
+        handle(sbn)
+    }
+
+    private fun handle(sbn: StatusBarNotification) {
+        val n = sbn.notification
         val app = appName(sbn.packageName) ?: return
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
         val extras = n.extras

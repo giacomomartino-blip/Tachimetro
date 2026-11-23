@@ -29,6 +29,7 @@ import com.google.android.libraries.navigation.Waypoint
 import it.giacomo.tachimetro.BuildConfig
 import it.giacomo.tachimetro.Hub
 import it.giacomo.tachimetro.NavUi
+import it.giacomo.tachimetro.data.Place
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -47,6 +48,11 @@ object NavController {
     var avoidHighways = false
     var avoidTolls = false
     private var lastDest: Triple<Double, Double, String>? = null
+    /** Percorso calcolato e mostrato sulla mappa, in attesa del tuo «partiamo». */
+    var previewDest: Triple<Double, Double, String>? = null
+        private set
+    @Volatile
+    var view: NavigationView? = null
     private var lastTone = 0L
     private var initializing = false
 
@@ -171,6 +177,71 @@ object NavController {
         pending = null
     }
 
+    /**
+     * Calcola il percorso e lo mostra sulla mappa senza partire.
+     * Restituisce falso se la mappa integrata non è pronta; [onReady] riceve minuti e metri, oppure null se non c'è percorso.
+     */
+    fun preview(lat: Double, lng: Double, title: String, onReady: (Pair<Int, Int>?) -> Unit): Boolean {
+        val n = navigator ?: return false
+        try { n.stopGuidance() } catch (e: Exception) { }
+        val wp = Waypoint.builder().setLatLng(lat, lng).setTitle(title).build()
+        val options = RoutingOptions().avoidHighways(avoidHighways).avoidTolls(avoidTolls)
+        n.setDestination(wp, options).setOnResultListener { status ->
+            if (status == Navigator.RouteStatus.OK) {
+                previewDest = Triple(lat, lng, title)
+                try { view?.showRouteOverview() } catch (e: Exception) { }
+                val td = try { n.currentTimeAndDistance } catch (e: Exception) { null }
+                onReady(if (td != null) (td.seconds / 60).coerceAtLeast(1) to td.meters else (0 to 0))
+            } else {
+                previewDest = null
+                onReady(null)
+            }
+        }
+        return true
+    }
+
+    /** Parte con il percorso mostrato in anteprima. */
+    fun startPreview(): Boolean {
+        val n = navigator ?: return false
+        val d = previewDest ?: return false
+        previewDest = null
+        lastDest = d
+        n.startGuidance()
+        // dalla vista d'insieme torna a seguire l'auto
+        try { view?.getMapAsync { it.followMyLocation(com.google.android.gms.maps.GoogleMap.CameraPerspective.TILTED) } } catch (e: Exception) { }
+        Hub.nav.value = NavUi(active = true, destination = d.third, destLat = d.first, destLng = d.second)
+        return true
+    }
+
+    fun cancelPreview() {
+        if (previewDest == null) return
+        previewDest = null
+        try { navigator?.clearDestinations() } catch (e: Exception) { }
+    }
+
+    /** Cerca un indirizzo o un posto: coordinate, nome e indirizzo da leggere a voce. */
+    suspend fun geocodePlace(context: Context, query: String): Place? = withContext(Dispatchers.IO) {
+        try {
+            val g = Geocoder(context, Locale.ITALY)
+            val here = Hub.location.value
+            @Suppress("DEPRECATION")
+            val list = if (here != null) {
+                g.getFromLocationName(query, 1, here.latitude - 1.5, here.longitude - 1.5, here.latitude + 1.5, here.longitude + 1.5)
+                    ?.takeIf { it.isNotEmpty() } ?: g.getFromLocationName(query, 1)
+            } else {
+                g.getFromLocationName(query, 1)
+            }
+            val a = list?.firstOrNull() ?: return@withContext null
+            val street = listOfNotNull(a.thoroughfare, a.subThoroughfare).joinToString(" ")
+            val town = a.locality ?: a.subAdminArea
+            val address = listOf(street, town.orEmpty()).filter { it.isNotBlank() }.joinToString(", ").ifBlank { a.getAddressLine(0).orEmpty() }
+            val name = a.featureName?.takeIf { it.isNotBlank() && it != a.subThoroughfare && it != a.thoroughfare && !address.startsWith(it) }
+            Place(name ?: query, address, a.latitude, a.longitude)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     /** Ricalcola il percorso attuale con le nuove preferenze (autostrade, pedaggi). */
     fun reroute(context: Context): Boolean {
         val d = lastDest ?: return false
@@ -180,6 +251,7 @@ object NavController {
     }
 
     fun stop() {
+        previewDest = null
         navigator?.let {
             it.stopGuidance()
             it.clearDestinations()
@@ -224,6 +296,10 @@ fun NavMap(night: Boolean, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     val view = remember { NavigationView(context) }
+    DisposableEffect(view) {
+        NavController.view = view
+        onDispose { if (NavController.view === view) NavController.view = null }
+    }
 
     DisposableEffect(lifecycle) {
         view.onCreate(Bundle())
