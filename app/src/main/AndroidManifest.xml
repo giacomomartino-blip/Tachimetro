@@ -73,6 +73,7 @@
         <service
             android:name=".voice.VoiceService"
             android:exported="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="microphone|location|mediaPlayback" />
 
         <service

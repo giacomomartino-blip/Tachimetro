@@ -251,6 +251,7 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
                             }
                         }
                     }
+                    Toggle("Attiva solo con il Bluetooth dell'auto (guidatore)", s.requireCar) { v -> set { it[Keys.requireCar] = v } }
                     Toggle("Meteo e temperatura esterna", s.weatherOn) { v -> set { it[Keys.weatherOn] = v } }
                     Toggle("Apri quando entro in auto", s.autoStart) { v -> set { it[Keys.autoStart] = v } }
                     Toggle("Schermo intero, senza barre di Android", s.fullScreen) { v -> set { it[Keys.fullScreen] = v } }

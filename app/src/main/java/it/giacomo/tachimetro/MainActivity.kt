@@ -1,6 +1,11 @@
 package it.giacomo.tachimetro
 
 import android.Manifest
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.media.AudioManager
@@ -31,14 +36,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import it.giacomo.tachimetro.car.Car
+import it.giacomo.tachimetro.car.CarLink
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Prefs
+import it.giacomo.tachimetro.media.MediaSessions
+import it.giacomo.tachimetro.media.Radio
 import it.giacomo.tachimetro.nav.NavController
+import it.giacomo.tachimetro.notify.NotificationReader
 import it.giacomo.tachimetro.ui.AppBarScreen
 import it.giacomo.tachimetro.ui.DAY
 import it.giacomo.tachimetro.ui.DriverDashboard
@@ -47,6 +58,7 @@ import it.giacomo.tachimetro.ui.LocalPal
 import it.giacomo.tachimetro.ui.ModeChooser
 import it.giacomo.tachimetro.ui.NIGHT
 import it.giacomo.tachimetro.ui.ParkingScreen
+import it.giacomo.tachimetro.ui.WaitingForCar
 import it.giacomo.tachimetro.ui.PassengerScreen
 import it.giacomo.tachimetro.ui.SettingsScreen
 import it.giacomo.tachimetro.ui.rememberAutoNight
@@ -69,10 +81,32 @@ class MainActivity : ComponentActivity() {
     )
 
     private val askPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        restartVoice()
+        stopService(Intent(this, VoiceService::class.java))
+        evaluateGate()
     }
 
     private var settings = AppSettings()
+    private var settingsLoaded = false
+    private var gateKey = ""
+
+    /** Collegamento e scollegamento del Bluetooth mentre Tachimetro è aperto. */
+    private val carReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context, i: Intent) {
+            val s = settings
+            if (i.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
+                evaluateGate()
+                return
+            }
+            @Suppress("DEPRECATION")
+            val dev = i.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
+            val addr = try { dev.address } catch (e: SecurityException) { return }
+            if (s.carBtAddress.isBlank() || !addr.equals(s.carBtAddress, true)) return
+            when (i.action) {
+                BluetoothDevice.ACTION_ACL_CONNECTED -> window.decorView.postDelayed({ evaluateGate() }, 1500)
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> onCarDisconnected()
+            }
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -82,6 +116,12 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             Prefs.flow(applicationContext).collect { s ->
                 settings = s
+                settingsLoaded = true
+                val key = listOf(s.mode, s.requireCar, s.carBtAddress).joinToString("|")
+                if (key != gateKey) {
+                    gateKey = key
+                    evaluateGate()
+                }
                 applyWindow(s, Hub.health.value.hot)
                 NavController.speedAlertMode = s.speedAlert
                 if (NavController.tolerance != s.tolerance) {
@@ -94,6 +134,13 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch { Hub.actions.collect { handle(it) } }
         NavController.onSpeedingTone = { beep() }
 
+        val filter = IntentFilter().apply {
+            addAction(BluetoothDevice.ACTION_ACL_CONNECTED)
+            addAction(BluetoothDevice.ACTION_ACL_DISCONNECTED)
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+        }
+        ContextCompat.registerReceiver(this, carReceiver, filter, ContextCompat.RECEIVER_EXPORTED)
+
         setContent { TachiRoot(onAskPermissions = { askPermissions.launch(permissions) }) }
 
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -103,6 +150,49 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        if (settingsLoaded) evaluateGate()
+    }
+
+    override fun onDestroy() {
+        try { unregisterReceiver(carReceiver) } catch (e: Exception) { }
+        if (isFinishing) shutdown()
+        super.onDestroy()
+    }
+
+    /**
+     * In modalità guidatore Tachimetro si attiva solo se il telefono è collegato al Bluetooth dell'auto.
+     * In modalità passeggero (tablet con le cuffie) non serve.
+     */
+    private fun evaluateGate() {
+        val s = settings
+        if (s.mode == "passenger" || !s.requireCar) {
+            activate()
+            return
+        }
+        if (s.carBtAddress.isBlank()) {
+            Hub.carGate.value = CarGate.NOT_SET
+            deactivate()
+            return
+        }
+        if (Hub.carGate.value != CarGate.READY) Hub.carGate.value = CarGate.CHECKING
+        CarLink.check(this, s.carBtAddress) { ok ->
+            when (ok) {
+                true -> activate()
+                false -> {
+                    Hub.carGate.value = CarGate.WAITING
+                    deactivate()
+                }
+                null -> {
+                    Hub.carGate.value = CarGate.NO_PERMISSION
+                    deactivate()
+                }
+            }
+        }
+    }
+
+    private fun activate() {
+        Hub.carGate.value = CarGate.READY
+        NotificationReader.rebind(this)
         if (!VoiceService.running) VoiceService.start(this)
         // la mappa riparte da sola dopo aver concesso la posizione
         if (BuildConfig.HAS_MAPS_KEY && NavController.navigator == null &&
@@ -110,6 +200,38 @@ class MainActivity : ComponentActivity() {
         ) {
             NavController.init(this)
         }
+    }
+
+    /** Spegne voce, posizione, radio e navigazione, ma lascia l'app aperta in attesa dell'auto. */
+    private fun deactivate() {
+        if (VoiceService.running) stopService(Intent(this, VoiceService::class.java))
+        NavController.stop()
+    }
+
+    /** L'auto si è scollegata: salva il parcheggio e chiude tutto. */
+    private fun onCarDisconnected() {
+        val s = settings
+        if (s.mode == "passenger" || !s.requireCar || Hub.carGate.value != CarGate.READY) return
+        val loc = Hub.location.value
+        lifecycleScope.launch {
+            if (s.saveParking && loc != null) Car.saveParking(applicationContext, loc)
+            closeApp()
+        }
+    }
+
+    /** Chiusura completa: nessun servizio, ascolto, GPS o lettura notifiche resta attivo. */
+    private fun shutdown() {
+        stopService(Intent(this, VoiceService::class.java))
+        NavController.release()
+        Radio.release()
+        MediaSessions.stop()
+        NotificationReader.unbind()
+        Hub.carGate.value = CarGate.CHECKING
+    }
+
+    private fun closeApp() {
+        shutdown()
+        finishAndRemoveTask()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -120,11 +242,6 @@ class MainActivity : ComponentActivity() {
     private fun readScreenExtra(i: Intent?) {
         val name = i?.getStringExtra(EXTRA_SCREEN) ?: return
         runCatching { Screen.valueOf(name) }.getOrNull()?.let { Hub.screen.value = it }
-    }
-
-    private fun restartVoice() {
-        stopService(Intent(this, VoiceService::class.java))
-        VoiceService.start(this)
     }
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
@@ -185,6 +302,7 @@ class MainActivity : ComponentActivity() {
                 Hub.screen.value = Screen.DASHBOARD
             }
             is UiAction.Show -> Hub.screen.value = a.screen
+            UiAction.Close -> closeApp()
             is UiAction.SetMode -> {
                 Prefs.edit(applicationContext) { it[Keys.mode] = if (a.driver) "driver" else "passenger" }
                 Hub.screen.value = if (a.driver) Screen.DASHBOARD else Screen.PASSENGER
@@ -205,6 +323,7 @@ fun TachiRoot(onAskPermissions: () -> Unit) {
     val s = sOrNull
     val loc by Hub.location.collectAsState()
     val screen by Hub.screen.collectAsState()
+    val gate by Hub.carGate.collectAsState()
     val auto = rememberAutoNight(loc?.latitude, loc?.longitude)
     if (s == null) {
         Box(Modifier.fillMaxSize().background(NIGHT.bg))
@@ -249,6 +368,8 @@ fun TachiRoot(onAskPermissions: () -> Unit) {
                     scope.launch { Prefs.edit(context) { it[Keys.mode] = if (driver) "driver" else "passenger" } }
                     Hub.screen.value = if (driver) Screen.DASHBOARD else Screen.PASSENGER
                 }
+            } else if (s.mode != "passenger" && s.requireCar && gate != CarGate.READY && screen != Screen.SETTINGS) {
+                WaitingForCar(gate, s.carBtName)
             } else {
                 when (screen) {
                     Screen.DASHBOARD -> if (s.mode == "passenger") PassengerScreen(s, night) else DriverDashboard(s, night)

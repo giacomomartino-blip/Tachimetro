@@ -150,6 +150,18 @@ object NavController {
         }
     }
 
+    /** Libera la navigazione quando chiudi Tachimetro, così non resta nulla attivo. */
+    fun release() {
+        stop()
+        try {
+            NavigationApi.cleanup()
+        } catch (e: Exception) {
+        }
+        navigator = null
+        initializing = false
+        pending = null
+    }
+
     fun stop() {
         navigator?.let {
             it.stopGuidance()

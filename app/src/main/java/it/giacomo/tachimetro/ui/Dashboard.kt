@@ -102,7 +102,7 @@ fun AppBarItems(
     val p = LocalPal.current
     val messages by Hub.messages.collectAsState()
     val screen by Hub.screen.collectAsState()
-    val all = items + listOf("fn:all", "fn:settings")
+    val all = items + listOf("fn:all", "fn:settings", "fn:close")
     @Composable
     fun item(id: String) {
         val active = when (id) {
@@ -125,6 +125,7 @@ fun AppBarItems(
                 }
                 "fn:all" -> Hub.screen.value = Screen.APP_BAR
                 "fn:settings" -> Hub.screen.value = Screen.SETTINGS
+                "fn:close" -> Hub.send(UiAction.Close)
                 else -> Apps.launch(context, id.removePrefix("app:"))
             }
         }
@@ -136,6 +137,7 @@ fun AppBarItems(
             "fn:radio" -> "Radio"
             "fn:all" -> "Barra delle app"
             "fn:settings" -> "Impostazioni"
+            "fn:close" -> "Chiudi Tachimetro"
             else -> Apps.label(context, id.removePrefix("app:"))
         }
         Box(
@@ -152,6 +154,7 @@ fun AppBarItems(
                     "fn:music" -> Ic.music
                     "fn:radio" -> Ic.radio
                     "fn:all" -> Ic.grid
+                    "fn:close" -> Ic.power
                     else -> Ic.gear
                 }
                 IconBox(icon, if (active) p.acc else p.surf2, if (active) p.onAcc else p.text, size, if (size > 52.dp) 24.dp else 22.dp, desc = label)
@@ -176,7 +179,7 @@ fun AppBarItems(
             Modifier.fillMaxWidth().padding(8.dp),
             horizontalArrangement = Arrangement.SpaceEvenly,
             verticalAlignment = Alignment.CenterVertically,
-        ) { all.take(6).forEach { item(it) } }
+        ) { (all.take(5) + "fn:close").forEach { item(it) } }
     }
 }
 
@@ -633,6 +636,32 @@ fun PassengerScreen(s: AppSettings, night: Boolean) {
             if (!wide) Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Btn("Modalità guidatore", modifier = Modifier.weight(1f)) { Hub.send(UiAction.SetMode(true)) }
                 Btn("Impostazioni", modifier = Modifier.weight(1f), icon = Ic.gear) { Hub.screen.value = Screen.SETTINGS }
+            }
+        }
+    }
+}
+
+// ---------------- in attesa dell'auto ----------------
+
+@Composable
+fun WaitingForCar(gate: it.giacomo.tachimetro.CarGate, carName: String) {
+    val p = LocalPal.current
+    val (title, text) = when (gate) {
+        it.giacomo.tachimetro.CarGate.NOT_SET -> "Scegli la tua auto" to "Nelle impostazioni, alla voce Auto, tocca il Bluetooth della tua auto. Tachimetro si attiverà solo quando il telefono è collegato."
+        it.giacomo.tachimetro.CarGate.NO_PERMISSION -> "Serve il permesso Bluetooth" to "Senza il permesso Bluetooth Tachimetro non può sapere se sei in auto. Concedilo nelle impostazioni, alla voce Permessi."
+        it.giacomo.tachimetro.CarGate.CHECKING -> "Controllo il collegamento…" to "Un attimo."
+        else -> "Collega il Bluetooth dell'auto" to "Tachimetro si attiva quando il telefono è collegato a ${carName.ifBlank { "la tua auto" }}. Finché non lo è, microfono, GPS e servizi restano spenti."
+    }
+    Box(Modifier.fillMaxSize().background(p.bg), contentAlignment = Alignment.Center) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(28.dp)) {
+            Icon(Ic.car, null, tint = p.acc, modifier = Modifier.size(56.dp))
+            T("Tachimetro", 15.sp, FontWeight.Bold, p.acc)
+            T(title, 26.sp, FontWeight.ExtraBold)
+            Muted(text, 15.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Btn("Impostazioni", gate == it.giacomo.tachimetro.CarGate.NOT_SET || gate == it.giacomo.tachimetro.CarGate.NO_PERMISSION, icon = Ic.gear) { Hub.screen.value = Screen.SETTINGS }
+                Btn("Modalità passeggero") { Hub.send(UiAction.SetMode(false)) }
+                Btn("Chiudi", icon = Ic.power) { Hub.send(UiAction.Close) }
             }
         }
     }

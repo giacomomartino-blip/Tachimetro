@@ -115,5 +115,6 @@ object Ic {
     val lock by lazy { v("lock", "M7 11h10a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z", "M8 11V8a4 4 0 0 1 8 0v3") }
     val gear by lazy { v("gear", "M9 12a3 3 0 1 0 6 0a3 3 0 1 0-6 0", "M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6L7 7M17 17l1.4 1.4M5.6 18.4L7 17M17 7l1.4-1.4") }
     val stop by lazy { v("stop", "M6 6h12v12H6z") }
+    val power by lazy { v("power", "M12 3v8", "M6.3 6.3a8 8 0 1 0 11.4 0") }
     val car by lazy { v("car", "M5 16l1.5-5a2 2 0 0 1 2-1.5h7a2 2 0 0 1 2 1.5L19 16", "M4 16h16v3H4z", "M7 19v1.5M17 19v1.5") }
 }

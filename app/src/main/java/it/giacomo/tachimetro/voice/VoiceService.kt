@@ -111,7 +111,16 @@ class VoiceService : Service() {
             ACTION_LISTEN -> main.post { onWake() }
             ACTION_SAY -> intent.getStringExtra(EXTRA_TEXT)?.let { say(it) }
         }
-        return START_STICKY
+        // se Android chiude il servizio non lo fa ripartire da solo
+        return START_NOT_STICKY
+    }
+
+    /** L'app è stata chiusa dall'elenco delle app recenti: si spegne tutto. */
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        NotificationReader.unbind()
+        MediaSessions.stop()
+        stopSelf()
+        super.onTaskRemoved(rootIntent)
     }
 
     override fun onDestroy() {
@@ -473,6 +482,7 @@ class VoiceService : Service() {
                 if (w == null) say("Non ho ancora i dati del meteo.") else say("${w.description}, ${w.tempC.toInt()} gradi.")
             }
             Command.Cancel -> say("Va bene.")
+            Command.CloseApp -> say("Chiudo Tachimetro.") { Hub.send(UiAction.Close) }
             is Command.AskGemini -> askGemini(cmd.question)
         }
     }

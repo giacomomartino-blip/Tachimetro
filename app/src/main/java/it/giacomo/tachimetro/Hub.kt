@@ -9,6 +9,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 
 enum class Screen { DASHBOARD, PASSENGER, SETTINGS, APP_BAR, PARKING, FUEL }
 
+/** Stato del collegamento con l'auto: in modalità guidatore Tachimetro si attiva solo con l'auto collegata. */
+enum class CarGate { CHECKING, READY, WAITING, NOT_SET, NO_PERMISSION }
+
 data class WeatherNow(val tempC: Double, val description: String, val code: Int)
 
 data class NowPlaying(
@@ -66,6 +69,7 @@ sealed interface UiAction {
     data object BackToMaps : UiAction
     data class Show(val screen: Screen) : UiAction
     data class SetMode(val driver: Boolean) : UiAction
+    data object Close : UiAction
 }
 
 /** Punto di incontro tra il servizio vocale, i lettori di notifiche e l'interfaccia. */
@@ -82,6 +86,7 @@ object Hub {
     val health = MutableStateFlow(PhoneHealth())
     val mapsStatus = MutableStateFlow<String?>(null)
     val speeding = MutableStateFlow(false)
+    val carGate = MutableStateFlow(CarGate.CHECKING)
     val fuel = MutableStateFlow<List<FuelStation>>(emptyList())
     val actions = MutableSharedFlow<UiAction>(extraBufferCapacity = 16)
 

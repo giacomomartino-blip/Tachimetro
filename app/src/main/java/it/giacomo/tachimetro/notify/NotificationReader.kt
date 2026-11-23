@@ -20,11 +20,13 @@ class NotificationReader : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         connected = true
+        instance = this
         MediaSessions.start(applicationContext)
     }
 
     override fun onListenerDisconnected() {
         connected = false
+        instance = null
         super.onListenerDisconnected()
     }
 
@@ -72,6 +74,26 @@ class NotificationReader : NotificationListenerService() {
     companion object {
         @Volatile
         var connected = false
+
+        @Volatile
+        private var instance: NotificationReader? = null
+
+        /** Ricollega la lettura delle notifiche quando apri Tachimetro. */
+        fun rebind(context: Context) {
+            try {
+                requestRebind(android.content.ComponentName(context, NotificationReader::class.java))
+            } catch (e: Exception) {
+            }
+        }
+
+        /** Scollega la lettura delle notifiche quando chiudi Tachimetro: nessun processo resta attivo. */
+        fun unbind() {
+            try {
+                instance?.requestUnbind()
+            } catch (e: Exception) {
+            }
+            Hub.messages.value = emptyList()
+        }
 
         fun appName(pkg: String): String? = when (pkg) {
             "com.whatsapp", "com.whatsapp.w4b" -> "WhatsApp"

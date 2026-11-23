@@ -29,6 +29,7 @@ sealed interface Command {
     data object Mute : Command
     data object Weather : Command
     data object Cancel : Command
+    data object CloseApp : Command
     data class AskGemini(val question: String) : Command
 }
 
@@ -53,6 +54,9 @@ object CommandParser {
 
         // annullare
         if (t in setOf("annulla", "lascia stare", "niente", "no", "basta così")) return Command.Cancel
+
+        // chiusura
+        if (Regex("^(chiudi|spegni|esci da) (tachimetro|l'app|l app|tutto)|^(esci|spegniti|chiuditi)$").containsMatchIn(t)) return Command.CloseApp
 
         // schermate
         if (Regex("^(torna al |vai al |apri il )?cruscotto|^torna indietro|^home$").containsMatchIn(t)) return Command.Dashboard

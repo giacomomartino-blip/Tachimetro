@@ -47,6 +47,7 @@ data class AppSettings(
     val autoStart: Boolean = true,
     val keepScreenOn: Boolean = true,
     val fullScreen: Boolean = true,
+    val requireCar: Boolean = true,
     val burnIn: Boolean = true,
     val saveParking: Boolean = true,
     val healthAlerts: Boolean = true,
@@ -83,6 +84,7 @@ object Keys {
     val autoStart = booleanPreferencesKey("autoStart")
     val keepScreenOn = booleanPreferencesKey("keepScreenOn")
     val fullScreen = booleanPreferencesKey("fullScreen")
+    val requireCar = booleanPreferencesKey("requireCar")
     val burnIn = booleanPreferencesKey("burnIn")
     val saveParking = booleanPreferencesKey("saveParking")
     val healthAlerts = booleanPreferencesKey("healthAlerts")
@@ -121,6 +123,7 @@ private fun Preferences.toSettings(): AppSettings {
         autoStart = this[Keys.autoStart] ?: d.autoStart,
         keepScreenOn = this[Keys.keepScreenOn] ?: d.keepScreenOn,
         fullScreen = this[Keys.fullScreen] ?: d.fullScreen,
+        requireCar = this[Keys.requireCar] ?: d.requireCar,
         burnIn = this[Keys.burnIn] ?: d.burnIn,
         saveParking = this[Keys.saveParking] ?: d.saveParking,
         healthAlerts = this[Keys.healthAlerts] ?: d.healthAlerts,
