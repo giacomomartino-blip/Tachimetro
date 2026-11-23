@@ -18,6 +18,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.CalendarContract
 import android.provider.ContactsContract
+import android.provider.ContactsContract.CommonDataKinds.Phone as P
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import androidx.core.app.NotificationCompat
@@ -1191,7 +1192,6 @@ class VoiceService : Service() {
     private fun allContacts(): List<Contact> {
         val now = System.currentTimeMillis()
         contactCache?.let { if (now - contactCacheAt < 10 * 60_000L) return it }
-        val P = ContactsContract.CommonDataKinds.Phone
         val out = LinkedHashMap<String, Pair<Contact, Int>>()
         try {
             contentResolver.query(
