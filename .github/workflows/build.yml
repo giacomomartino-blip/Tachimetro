@@ -1,0 +1,87 @@
+name: Compila Tachimetro (Android .apk)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    name: Android (.apk)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.11.1"
+
+      # Modello italiano per riconoscere «Ehi Tachi» sul telefono, senza internet
+      - name: Scarica il modello vocale italiano
+        run: |
+          curl -L --retry 3 -o model.zip https://alphacephei.com/vosk/models/vosk-model-small-it-0.22.zip
+          unzip -q model.zip
+          mkdir -p app/src/main/assets
+          rm -rf app/src/main/assets/model-it
+          mv vosk-model-small-it-0.22 app/src/main/assets/model-it
+          uuidgen > app/src/main/assets/model-it/uuid
+
+      # La chiave di firma e quella di Google Maps stanno solo nei segreti di GitHub
+      - name: Controlla i segreti e prepara la chiave di firma
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+        run: |
+          missing=""
+          for v in KEYSTORE_BASE64 KEYSTORE_PASSWORD KEY_ALIAS KEY_PASSWORD MAPS_API_KEY; do
+            if [ -z "${!v}" ]; then missing="$missing $v"; fi
+          done
+          if [ -n "$missing" ]; then echo "::error::Segreti mancanti:$missing"; exit 1; fi
+          case "$MAPS_API_KEY" in AIza*) ;; *) echo "::error::MAPS_API_KEY non sembra una chiave di Google"; exit 1;; esac
+          echo "$KEYSTORE_BASE64" | tr -d ' \r\n' | base64 -d > "$RUNNER_TEMP/tachimetro.keystore" || { echo "::error::KEYSTORE_BASE64 non valido"; exit 1; }
+          keytool -list -keystore "$RUNNER_TEMP/tachimetro.keystore" -storepass "$KEYSTORE_PASSWORD" -alias "$KEY_ALIAS" > /dev/null \
+            || { echo "::error::Password o alias della chiave di firma non corretti"; exit 1; }
+          echo "KEYSTORE_FILE=$RUNNER_TEMP/tachimetro.keystore" >> "$GITHUB_ENV"
+
+      # l'Android SDK è già installato sulle macchine ubuntu di GitHub (ANDROID_HOME)
+      - name: Compila l'APK firmato
+        env:
+          MAPS_API_KEY: ${{ secrets.MAPS_API_KEY }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: gradle assembleRelease --no-daemon --stacktrace
+
+      # La firma deve restare sempre la stessa, altrimenti gli aggiornamenti non si installano
+      - name: Verifica la firma dell'APK
+        run: |
+          SIGNER=$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
+          SHA1=$("$SIGNER" verify --print-certs app/build/outputs/apk/release/app-release.apk | grep -i "SHA-1 digest" | head -1 | awk '{print $NF}')
+          echo "Impronta SHA-1: $SHA1"
+          if [ "$SHA1" != "75e505093b47a8098ee1b09ae6e6b484801925db" ]; then echo "::error::La firma dell'APK è cambiata"; exit 1; fi
+
+      - name: Rinomina
+        run: cp app/build/outputs/apk/release/app-release.apk "Tachimetro-${{ github.run_number }}.apk"
+
+      # L'APK va direttamente nella release: lo spazio per gli "artifact" di GitHub dell'account è esaurito.
+      - name: Crea la release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Tachimetro 0.1.${{ github.run_number }}
+          make_latest: true
+          body: |
+            Apri `Tachimetro-${{ github.run_number }}.apk` dal telefono o dal tablet e consenti l'installazione da questa fonte.
+          files: Tachimetro-*.apk

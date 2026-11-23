@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- quadrante del tachimetro -->
+    <path
+        android:pathData="M30,66 A26,26 0 1,1 78,66"
+        android:strokeWidth="7"
+        android:strokeColor="#4FD1C5"
+        android:strokeLineCap="round"
+        android:fillColor="#00000000" />
+    <!-- tacche -->
+    <path
+        android:pathData="M54,32 L54,38 M36,44 L40,48 M72,44 L68,48"
+        android:strokeWidth="4"
+        android:strokeColor="#EEF2F8"
+        android:strokeLineCap="round" />
+    <!-- lancetta -->
+    <path
+        android:pathData="M54,62 L69,45"
+        android:strokeWidth="6"
+        android:strokeColor="#FF9F6B"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M49,62 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0"
+        android:fillColor="#EEF2F8" />
+</vector>

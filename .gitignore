@@ -1,0 +1,13 @@
+.gradle/
+build/
+app/build/
+local.properties
+.idea/
+*.iml
+app/src/main/assets/model-it/
+
+# segreti: stanno solo nei Secrets di GitHub
+*.keystore
+*.jks
+keystore.properties
+maps.properties
