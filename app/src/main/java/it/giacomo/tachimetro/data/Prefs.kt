@@ -44,7 +44,7 @@ data class AppSettings(
     val barPassenger: List<String> = DEFAULT_BAR_PASSENGER,
     val tabletConnection: String = "auto",   // auto, sim, hotspot
     val weatherOn: Boolean = true,
-    val autoStart: Boolean = true,
+    val autoStart: Boolean = false,
     val keepScreenOn: Boolean = true,
     val fullScreen: Boolean = true,
     val requireCar: Boolean = true,
