@@ -58,6 +58,8 @@ data class AppSettings(
     val groupMode: String = "ask",           // ask, name, never
     val favorites: String = "",
     val announceCalls: Boolean = true,
+    val msgApp: String = "whatsapp",       // whatsapp, sms, ask
+    val waAutoSend: Boolean = false,
     val burnIn: Boolean = true,
     val saveParking: Boolean = true,
     val healthAlerts: Boolean = true,
@@ -103,6 +105,8 @@ object Keys {
     val groupMode = stringPreferencesKey("groupMode")
     val favorites = stringPreferencesKey("favorites")
     val announceCalls = booleanPreferencesKey("announceCalls")
+    val msgApp = stringPreferencesKey("msgApp")
+    val waAutoSend = booleanPreferencesKey("waAutoSend")
     val burnIn = booleanPreferencesKey("burnIn")
     val saveParking = booleanPreferencesKey("saveParking")
     val healthAlerts = booleanPreferencesKey("healthAlerts")
@@ -154,6 +158,8 @@ private fun Preferences.toSettings(): AppSettings {
         groupMode = this[Keys.groupMode] ?: d.groupMode,
         favorites = this[Keys.favorites] ?: d.favorites,
         announceCalls = this[Keys.announceCalls] ?: d.announceCalls,
+        msgApp = this[Keys.msgApp] ?: d.msgApp,
+        waAutoSend = this[Keys.waAutoSend] ?: d.waAutoSend,
         burnIn = this[Keys.burnIn] ?: d.burnIn,
         saveParking = this[Keys.saveParking] ?: d.saveParking,
         healthAlerts = this[Keys.healthAlerts] ?: d.healthAlerts,

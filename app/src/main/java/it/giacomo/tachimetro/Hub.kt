@@ -55,6 +55,8 @@ data class NavUi(
     val etaText: String = "",
     val remainingText: String = "",
     val viaWaze: Boolean = false,
+    val destLat: Double? = null,
+    val destLng: Double? = null,
 )
 
 data class CameraAlert(val distanceM: Int, val label: String, val maxSpeed: Int?)
@@ -103,6 +105,8 @@ object Hub {
     val wakeDetectedAt = MutableStateFlow(0L)
     val incomingCall = MutableStateFlow<IncomingCall?>(null)
     val geminiError = MutableStateFlow<String?>(null)
+    /** Ultima persona che ti ha chiamato o che hai chiamato con Tachimetro, per «richiama». */
+    val lastCaller = MutableStateFlow<String?>(null)
     val fuel = MutableStateFlow<List<FuelStation>>(emptyList())
     val actions = MutableSharedFlow<UiAction>(extraBufferCapacity = 16)
 

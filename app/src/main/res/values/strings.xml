@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="wa_sender_description">Serve solo a premere «Invia» in WhatsApp quando detti un messaggio a Tachimetro e confermi l\'invio a voce. Agisce soltanto dentro WhatsApp, per pochi secondi dopo la tua conferma, e non legge né salva le tue chat.</string>
+</resources>

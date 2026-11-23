@@ -13,7 +13,21 @@ sealed interface Command {
     data object Next : Command
     data object Previous : Command
     data class Volume(val up: Boolean) : Command
-    data class Call(val name: String) : Command
+    data class Call(val name: String, val whatsapp: Boolean = false) : Command
+    data class SendMessage(val rest: String, val app: String?) : Command
+    data object CallBack : Command
+    data object HangUp : Command
+    data object Eta : Command
+    data object WhereAmI : Command
+    data class Avoid(val highways: Boolean, val tolls: Boolean) : Command
+    data object FindParking : Command
+    data object SaveParking : Command
+    data class Reminder(val minutes: Int) : Command
+    data object CameraAhead : Command
+    data class SetPref(val key: String, val value: String) : Command
+    data object Time : Command
+    data class WeatherAt(val place: String?) : Command
+    data object Battery : Command
     data object ReadMessages : Command
     data object Reply : Command
     data object JoinMeeting : Command
@@ -27,7 +41,6 @@ sealed interface Command {
     data object Dashboard : Command
     data object Settings : Command
     data object Mute : Command
-    data object Weather : Command
     data object Cancel : Command
     data object CloseApp : Command
     data class AskGemini(val question: String) : Command
@@ -116,7 +129,51 @@ object CommandParser {
         if (Regex("(trova|cerca|dov'è|dove).*(benzina|distribut|gasolio|diesel|carburante|gpl|metano)").containsMatchIn(t) ||
             Regex("^(benzina|distributor[ei])").containsMatchIn(t)
         ) return Command.FindFuel
-        if (Regex("(che tempo fa|meteo|temperatura)").containsMatchIn(t) && !t.contains("chiedi")) return Command.Weather
+        // meteo: «che tempo fa», «che tempo fa all'arrivo», «che tempo fa a Napoli»
+        Regex("^(che tempo fa|com'è il tempo|com è il tempo|meteo|che temperatura c'è|che temperatura fa)( a destinazione| all'arrivo| all arrivo| dove vado| a | in )?(.*)$").find(t)?.let {
+            val where = it.groupValues[2].trim()
+            val place = it.groupValues[3].trim()
+            return when {
+                where.startsWith("a destinazione") || where.contains("arrivo") || where.contains("dove vado") -> Command.WeatherAt("@arrivo")
+                place.isNotBlank() && (where == "a" || where == "in") -> Command.WeatherAt(place)
+                else -> Command.WeatherAt(null)
+            }
+        }
+        if (Regex("^(che ore sono|che ora è|che ora e|dimmi l'ora)").containsMatchIn(t)) return Command.Time
+        if (Regex("(quanta batteria|batteria del telefono|livello della batteria)").containsMatchIn(t)) return Command.Battery
+
+        // auto
+        if (Regex("^(quanto manca|a che ora arrivo|quando arrivo|tra quanto arrivo|quanta strada manca)").containsMatchIn(t)) return Command.Eta
+        if (Regex("^(dove sono|dove mi trovo|in che via sono|in che strada sono)").containsMatchIn(t)) return Command.WhereAmI
+        if (Regex("evita (le )?autostrade").containsMatchIn(t) || Regex("evita (i )?pedaggi").containsMatchIn(t)) {
+            return Command.Avoid(t.contains("autostrad"), t.contains("pedagg"))
+        }
+        if (Regex("^(cerca|trova|cercami|trovami) (un )?parcheggio").containsMatchIn(t)) return Command.FindParking
+        if (Regex("^(salva|segna|ricorda) (il |dove ho )?parcheggi").containsMatchIn(t)) return Command.SaveParking
+        Regex("^ricordami (le )?strisce( blu)? tra (.+)$").find(t)?.let { m ->
+            minutes(m.groupValues[3])?.let { return Command.Reminder(it) }
+        }
+        if (Regex("(c'è|ci sono|ci sono degli|c è) (un |degli )?autovelox|^autovelox").containsMatchIn(t)) return Command.CameraAhead
+
+        // impostazioni a voce
+        Regex("^(attiva|accendi|disattiva|spegni|togli) (il )?(non disturbare|schermo intero|lettura (dei )?messaggi|avvisi (degli )?autovelox)").find(t)?.let { m ->
+            val on = m.groupValues[1] in setOf("attiva", "accendi")
+            val what = m.groupValues[3]
+            val key = when {
+                what.startsWith("non disturbare") -> "dnd"
+                what.startsWith("schermo") -> "fullScreen"
+                what.startsWith("lettura") -> "readMessages"
+                else -> "cameras"
+            }
+            return Command.SetPref(key, on.toString())
+        }
+        Regex("^(tema|modalità) (notte|scuro|giorno|chiaro|automatico|automatica)$").find(t)?.let {
+            val v = when (it.groupValues[2]) { "notte", "scuro" -> "night"; "giorno", "chiaro" -> "day"; else -> "auto" }
+            return Command.SetPref("themeMode", v)
+        }
+        Regex("^sensibilità (alta|normale|bassa)").find(t)?.let {
+            return Command.SetPref("wakeSensitivity", mapOf("alta" to "high", "normale" to "normal", "bassa" to "low").getValue(it.groupValues[1]))
+        }
 
         // modalità
         if (Regex("modalità passeggero").containsMatchIn(t)) return Command.SetMode(false)
@@ -128,9 +185,32 @@ object CommandParser {
 
         // messaggi e chiamate
         if (Regex("(leggi|leggimi) (i |il )?(messaggi|messaggio|ultimo)").containsMatchIn(t)) return Command.ReadMessages
+        if (Regex("^(metti giù|metti giu|riaggancia|chiudi la chiamata|termina la chiamata|rifiuta( la chiamata)?)$").containsMatchIn(t)) return Command.HangUp
         if (Regex("^rispondi").containsMatchIn(t)) return Command.Reply
         if (Regex("(entra|partecipa|collegami)( nella| alla)? riunione").containsMatchIn(t)) return Command.JoinMeeting
-        Regex("^(chiama|telefona a|fai una chiamata a)\\s+(.+)$").find(t)?.let { return Command.Call(it.groupValues[2].trim()) }
+        if (Regex("^richiama( l'ultimo| l ultimo)?( numero| chiamata)?$").containsMatchIn(t)) return Command.CallBack
+        Regex("^(manda|invia|scrivi|mandagli|scrivigli)( un| il)? ?(messaggio whatsapp|messaggio|sms|whatsapp)? ?(a|ad|per) (.+)$").find(t)?.let { m ->
+            var rest = m.groupValues[5].trim()
+            var app: String? = when {
+                m.groupValues[3].contains("whatsapp") -> "whatsapp"
+                m.groupValues[3] == "sms" -> "sms"
+                else -> null
+            }
+            Regex("\\s(su|con|via|tramite) (whatsapp|sms|teams)\\b").find(rest)?.let { a ->
+                app = a.groupValues[2]
+                rest = rest.removeRange(a.range).trim()
+            }
+            return Command.SendMessage(rest, app)
+        }
+        Regex("^(chiama|telefona a|fai una chiamata a|videochiama)\\s+(.+)$").find(t)?.let {
+            var name = it.groupValues[2].trim()
+            var wa = false
+            Regex("\\s(su|con|via) whatsapp$").find(name)?.let { a ->
+                wa = true
+                name = name.removeRange(a.range).trim()
+            }
+            return Command.Call(name, wa)
+        }
 
         // riproduzione
         if (t in setOf("pausa", "metti in pausa", "stop", "ferma", "ferma la musica", "silenzio")) return Command.Pause
@@ -183,6 +263,22 @@ object CommandParser {
             place = place.removeRange(it.range).trim()
         }
         return Command.Navigate(normalizePlace("", place), waze)
+    }
+
+    private val NUM = mapOf(
+        "un" to 1, "uno" to 1, "una" to 1, "due" to 2, "tre" to 3, "quattro" to 4, "cinque" to 5, "dieci" to 10,
+        "quindici" to 15, "venti" to 20, "trenta" to 30, "quaranta" to 40, "quarantacinque" to 45, "cinquanta" to 50,
+        "novanta" to 90,
+    )
+
+    /** «un'ora», «mezz'ora», «due ore», «45 minuti» in minuti. */
+    fun minutes(text: String): Int? {
+        val t = text.replace("'", " ").trim()
+        if (t.startsWith("mezz")) return 30
+        if (Regex("^un ora e mezz").containsMatchIn(t)) return 90
+        val m = Regex("^(\\d+|[a-z]+) (ora|ore|minuto|minuti)").find(t) ?: return null
+        val n = m.groupValues[1].toIntOrNull() ?: NUM[m.groupValues[1]] ?: return null
+        return if (m.groupValues[2].startsWith("or")) n * 60 else n
     }
 
     /** Sì o no detto a voce; null se non si capisce. */

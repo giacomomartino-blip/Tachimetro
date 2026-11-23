@@ -38,22 +38,28 @@ import it.giacomo.tachimetro.TachiApp
 import it.giacomo.tachimetro.UiAction
 import it.giacomo.tachimetro.VoicePhase
 import it.giacomo.tachimetro.VoiceUi
+import it.giacomo.tachimetro.car.Car
 import it.giacomo.tachimetro.car.Dnd
 import it.giacomo.tachimetro.car.PhoneHealthMonitor
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Gemini
+import it.giacomo.tachimetro.data.Keys
+import it.giacomo.tachimetro.data.Net
 import it.giacomo.tachimetro.data.Prefs
 import it.giacomo.tachimetro.data.SpeedCameras
 import it.giacomo.tachimetro.data.Weather
 import it.giacomo.tachimetro.media.Apps
 import it.giacomo.tachimetro.media.MediaSessions
 import it.giacomo.tachimetro.media.Radio
+import it.giacomo.tachimetro.nav.NavController
 import it.giacomo.tachimetro.notify.NotificationReader
+import it.giacomo.tachimetro.notify.WhatsAppSender
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
@@ -93,7 +99,12 @@ class VoiceService : Service() {
         data class ReplyText(val msg: IncomingMessage) : Dialog
         data class ReplyConfirm(val msg: IncomingMessage, val text: String) : Dialog
         data class AskAnswer(val call: IncomingCall) : Dialog
+        data class ComposeApp(val to: Contact, val text: String) : Dialog
+        data class ComposeText(val to: Contact, val app: String) : Dialog
+        data class ComposeConfirm(val to: Contact, val app: String, val text: String) : Dialog
     }
+
+    private data class Contact(val name: String, val number: String)
 
     private var dialog: Dialog? = null
     private var dialogRetry = 0
@@ -414,17 +425,15 @@ class VoiceService : Service() {
     private fun yesNo(text: String): Boolean? {
         val t = CommandParser.normalize(text).trim()
         if (t.isBlank()) return null
-        if (Regex("^(no|non|nah|lascia|dopo|annulla|niente|basta|ignora)").containsMatchIn(t)) return false
-        if (Regex("^(s[iì]|certo|ok|okay|va bene|leggi|leggilo|rispondi|invia|invialo|manda|mandalo|dai|perfetto|esatto)").containsMatchIn(t)) return true
-        return null
+        return CommandParser.yesNo(text)
     }
 
     /** Ripete la domanda una volta se non ha capito, poi lascia perdere. */
-    private fun retryOrDrop(d: Dialog, question: String) {
+    private fun retryOrDrop(d: Dialog, question: String, yesNoQuestion: Boolean = true) {
         if (dialogRetry < 1) {
             dialogRetry++
             dialog = d
-            ask("Non ho capito. $question Sì o no?")
+            ask(if (yesNoQuestion) "Non ho capito. $question Sì o no?" else "Non ho capito. $question")
         } else {
             endDialog("Lascio stare.")
         }
@@ -465,7 +474,7 @@ class VoiceService : Service() {
             }
             is Dialog.ReplyText -> {
                 if (text.isBlank()) {
-                    retryOrDrop(d, "Cosa rispondo?")
+                    retryOrDrop(d, "Cosa rispondo?", false)
                 } else {
                     dialogRetry = 0
                     dialog = Dialog.ReplyConfirm(d.msg, text)
@@ -486,7 +495,11 @@ class VoiceService : Service() {
                 }
                 null -> if (Hub.incomingCall.value != null) retryOrDrop(d, "Rispondo?") else { dialog = null; endCommand() }
             }
-            is Dialog.ReplyConfirm -> when (yesNo(text)) {
+            is Dialog.ReplyConfirm -> if (wantsChange(text)) {
+                dialogRetry = 0
+                dialog = Dialog.ReplyText(d.msg)
+                ask("Va bene, cosa rispondo?")
+            } else when (yesNo(text)) {
                 true -> {
                     val ok = NotificationReader.reply(this, d.msg, d.text)
                     if (ok) Hub.removeMessage(d.msg.key)
@@ -495,8 +508,50 @@ class VoiceService : Service() {
                 false -> endDialog("Va bene, non lo invio.")
                 null -> retryOrDrop(d, "Lo invio?")
             }
+            is Dialog.ComposeApp -> {
+                val t = CommandParser.normalize(text)
+                val app = when {
+                    t.contains("whatsapp") || t.contains("whats app") || t.contains("uozap") -> "whatsapp"
+                    t.contains("sms") || t.contains("messaggio") || t.contains("normale") || t.contains("esse emme esse") -> "sms"
+                    else -> null
+                }
+                when {
+                    app != null -> {
+                        dialogRetry = 0
+                        composeNext(d.to, app, d.text)
+                    }
+                    yesNo(text) == false -> endDialog("Va bene.")
+                    else -> retryOrDrop(d, "Su WhatsApp o con SMS?", false)
+                }
+            }
+            is Dialog.ComposeText -> {
+                if (text.isBlank()) {
+                    retryOrDrop(d, "Cosa scrivo?", false)
+                } else if (CommandParser.normalize(text) in setOf("annulla", "lascia stare", "niente")) {
+                    endDialog("Va bene.")
+                } else {
+                    dialogRetry = 0
+                    composeNext(d.to, d.app, text)
+                }
+            }
+            is Dialog.ComposeConfirm -> if (wantsChange(text)) {
+                dialogRetry = 0
+                dialog = Dialog.ComposeText(d.to, d.app)
+                ask("Va bene, cosa scrivo?")
+            } else when (yesNo(text)) {
+                true -> {
+                    dialog = null
+                    dialogRetry = 0
+                    deliver(d.to, d.app, d.text)
+                }
+                false -> endDialog("Va bene, non lo invio.")
+                null -> retryOrDrop(d, "Lo invio?")
+            }
         }
     }
+
+    private fun wantsChange(text: String): Boolean =
+        Regex("^(correggi|cambia|riscrivi|modifica|rifallo|ripeti)").containsMatchIn(CommandParser.normalize(text))
 
     private fun who(m: IncomingMessage): String =
         if (m.group != null) "${m.sender} nel gruppo ${m.group} su ${m.app}" else "${m.sender} su ${m.app}"
@@ -541,6 +596,7 @@ class VoiceService : Service() {
             }
             return
         }
+        Hub.lastCaller.value = call.caller
         if (!settings.announceCalls || settings.mode != "driver") return
         stopWake()
         recognizer?.cancel()
@@ -610,9 +666,15 @@ class VoiceService : Service() {
             Command.Next -> MediaSessions.next(this)
             Command.Previous -> MediaSessions.previous(this)
             is Command.Volume -> MediaSessions.volume(this, cmd.up)
-            is Command.Call -> call(cmd.name)
+            is Command.Call -> if (cmd.whatsapp) whatsappCall(cmd.name) else call(cmd.name)
+            Command.CallBack -> {
+                val who = Hub.lastCaller.value
+                if (who == null || who == "numero sconosciuto") say("Non so chi richiamare.") else call(who)
+            }
+            Command.HangUp -> if (Hub.incomingCall.value != null || inCall()) answerCall(false) else say("Non c'è nessuna chiamata.")
+            is Command.SendMessage -> startCompose(cmd)
             Command.ReadMessages -> readMessages()
-            Command.Reply -> {
+            Command.Reply -> if (Hub.incomingCall.value != null) answerCall(true) else {
                 val m = Hub.messages.value.lastOrNull { it.replyIntent != null }
                 if (m == null) say("Non ci sono messaggi a cui rispondere.") else {
                     dialogRetry = 0
@@ -643,10 +705,37 @@ class VoiceService : Service() {
                 alertsMuted = true
                 say("Avvisi silenziati per questo viaggio.")
             }
-            Command.Weather -> {
-                val w = Hub.weather.value
-                if (w == null) say("Non ho ancora i dati del meteo.") else say("${w.description}, ${w.tempC.toInt()} gradi.")
+            is Command.WeatherAt -> weatherAt(cmd.place)
+            Command.Eta -> eta()
+            Command.WhereAmI -> whereAmI()
+            is Command.Avoid -> avoid(cmd)
+            Command.FindParking -> findParking()
+            Command.SaveParking -> {
+                val loc = Hub.location.value
+                if (loc == null) say("Non ho ancora la tua posizione.") else {
+                    scope.launch { Car.saveParking(applicationContext, loc) }
+                    say("Parcheggio salvato.")
+                }
             }
+            is Command.Reminder -> {
+                if (cmd.minutes <= 10) {
+                    say("Ti avviso dieci minuti prima della scadenza, quindi dimmi un tempo più lungo di dieci minuti.")
+                } else {
+                    Car.setReminder(applicationContext, cmd.minutes)
+                    say("Va bene, ti avviso dieci minuti prima della scadenza.")
+                }
+            }
+            Command.CameraAhead -> {
+                val c = Hub.camera.value
+                when {
+                    !settings.cameras -> say("Gli avvisi degli autovelox sono spenti.")
+                    c == null -> say("Nessun autovelox nei prossimi ${settings.cameraWarnMeters} metri.")
+                    else -> say("${c.label} tra ${c.distanceM} metri" + (c.maxSpeed?.let { ", limite $it" } ?: "") + ".")
+                }
+            }
+            is Command.SetPref -> setPref(cmd.key, cmd.value)
+            Command.Time -> say("Sono le " + java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("H:mm")) + ".")
+            Command.Battery -> battery()
             Command.Cancel -> say("Va bene.")
             Command.CloseApp -> say("Chiudo Tachimetro.") { Hub.send(UiAction.Close) }
             is Command.AskGemini -> askGemini(cmd.question)
@@ -715,8 +804,14 @@ class VoiceService : Service() {
         if (!granted(Manifest.permission.READ_CONTACTS) || !granted(Manifest.permission.CALL_PHONE)) {
             return say("Per chiamare servono i permessi per contatti e telefono, nelle impostazioni.")
         }
-        val found = findContact(name) ?: name.split(" ").firstOrNull()?.let { findContact(it) }
+        val digits = name.replace(Regex("[\\s./-]"), "")
+        val found = if (Regex("^\\+?\\d{5,}$").matches(digits)) {
+            name to digits
+        } else {
+            findContact(name) ?: name.split(" ").firstOrNull()?.let { findContact(it) }
+        }
         if (found == null) return say("Non trovo $name tra i contatti.")
+        Hub.lastCaller.value = found.first
         say("Chiamo ${found.first}.") {
             try {
                 startActivity(Intent(Intent.ACTION_CALL, Uri.parse("tel:" + found.second)).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -737,6 +832,329 @@ class VoiceService : Service() {
         } catch (e: Exception) {
             null
         }
+    }
+
+    // ---------------- messaggi dettati ----------------
+
+    /** «scrivi a Marco che arrivo tra dieci minuti»: trova il contatto e chiede quello che manca. */
+    private fun startCompose(cmd: Command.SendMessage) {
+        if (!granted(Manifest.permission.READ_CONTACTS)) return say("Per scrivere ai contatti serve il permesso per i contatti, nelle impostazioni.")
+        val words = cmd.rest.split(" ").filter { it.isNotBlank() }
+        var to: Contact? = null
+        var used = 0
+        for (n in minOf(4, words.size) downTo 1) {
+            val f = findContact(words.take(n).joinToString(" "))
+            if (f != null) {
+                to = Contact(f.first, f.second)
+                used = n
+                break
+            }
+        }
+        if (to == null) return say("Non trovo ${words.take(2).joinToString(" ")} tra i contatti.")
+        val text = words.drop(used).joinToString(" ")
+            .replace(Regex("^(che|dicendo che|dicendogli che|dicendole che|dicendo|di|e digli che|e dille che|scrivendo)\\s+"), "")
+            .trim()
+        // l'app: quella detta, altrimenti quella dell'ultimo messaggio ricevuto da questa persona, altrimenti quella preferita
+        val recent = Hub.messages.value.lastOrNull { it.group == null && sameName(it.sender, to.name) }
+        val app = cmd.app ?: recent?.app?.lowercase() ?: settings.msgApp
+        dialogRetry = 0
+        if (app == "ask") {
+            dialog = Dialog.ComposeApp(to, text)
+            ask("Scrivo a ${to.name} su WhatsApp o con SMS?")
+        } else {
+            composeNext(to, app, text)
+        }
+    }
+
+    private fun composeNext(to: Contact, app: String, text: String) {
+        if (text.isBlank()) {
+            dialog = Dialog.ComposeText(to, app)
+            ask("Cosa scrivo a ${to.name}?")
+        } else {
+            dialog = Dialog.ComposeConfirm(to, app, text)
+            ask("Scrivo a ${to.name} ${appWords(app)}: $text. Lo invio?")
+        }
+    }
+
+    private fun appWords(app: String) = when (app) {
+        "sms" -> "con un SMS"
+        "teams" -> "su Teams"
+        else -> "su WhatsApp"
+    }
+
+    private fun sameName(a: String, b: String): Boolean {
+        val x = a.lowercase().trim()
+        val y = b.lowercase().trim()
+        return x == y || x.startsWith(y) || y.startsWith(x)
+    }
+
+    /** Invia davvero, dopo che hai confermato a voce. */
+    private fun deliver(to: Contact, app: String, text: String) {
+        val label = when (app) { "sms" -> "SMS"; "teams" -> "Teams"; else -> "WhatsApp" }
+        // se c'è una notifica recente di questa persona, rispondo da lì senza aprire nulla
+        val notif = Hub.messages.value.lastOrNull {
+            it.app == label && it.group == null && it.replyIntent != null && sameName(it.sender, to.name)
+        }
+        if (notif != null && NotificationReader.reply(this, notif, text)) {
+            Hub.removeMessage(notif.key)
+            return endDialog("Inviato.")
+        }
+        when (app) {
+            "sms" -> {
+                if (!granted(Manifest.permission.SEND_SMS)) return endDialog("Per inviare SMS serve il permesso, nelle impostazioni.")
+                try {
+                    val sms = getSystemService(android.telephony.SmsManager::class.java)
+                    sms.sendMultipartTextMessage(to.number, null, sms.divideMessage(text), null, null)
+                    endDialog("SMS inviato a ${to.name}.")
+                } catch (e: Exception) {
+                    endDialog("Non sono riuscito a inviare l'SMS.")
+                }
+            }
+            "teams" -> {
+                Apps.findByName(this, "Teams")?.let { Apps.launch(this, it.packageName) }
+                endDialog("Su Teams posso rispondere solo ai messaggi che ti arrivano. Ho aperto Teams.")
+            }
+            else -> {
+                val auto = settings.waAutoSend && WhatsAppSender.isEnabled(this)
+                val phone = waNumber(to.number)
+                dialog = null
+                dialogRetry = 0
+                if (auto) {
+                    say("Invio.") {
+                        if (!WhatsAppSender.open(this, phone, text, true)) {
+                            say("WhatsApp non è installato.")
+                            return@say
+                        }
+                        main.postDelayed({
+                            if (!WhatsAppSender.lastResult) {
+                                bringToFront()
+                                say("Non sono riuscito a premere Invia. Il messaggio è pronto nella chat di WhatsApp.")
+                            } else {
+                                say("Inviato.")
+                            }
+                        }, 11_000)
+                    }
+                } else {
+                    say("Ho preparato il messaggio nella chat di WhatsApp: tocca Invia.") {
+                        if (!WhatsAppSender.open(this, phone, text, false)) say("WhatsApp non è installato.")
+                    }
+                }
+            }
+        }
+    }
+
+    /** Numero nel formato che serve a WhatsApp: prefisso internazionale senza «+». */
+    private fun waNumber(raw: String): String {
+        var n = raw.replace(Regex("[^+\\d]"), "")
+        n = when {
+            n.startsWith("+") -> n.drop(1)
+            n.startsWith("00") -> n.drop(2)
+            else -> "39$n"
+        }
+        return n
+    }
+
+    private fun whatsappCall(name: String) {
+        if (!granted(Manifest.permission.READ_CONTACTS)) return say("Per chiamare serve il permesso per i contatti, nelle impostazioni.")
+        val mime = "vnd.android.cursor.item/vnd.com.whatsapp.voip.call"
+        val row = try {
+            contentResolver.query(
+                ContactsContract.Data.CONTENT_URI,
+                arrayOf(ContactsContract.Data._ID, ContactsContract.Data.DISPLAY_NAME),
+                ContactsContract.Data.MIMETYPE + " = ? AND " + ContactsContract.Data.DISPLAY_NAME + " LIKE ?",
+                arrayOf(mime, "%$name%"),
+                null,
+            )?.use { c -> if (c.moveToFirst()) c.getLong(0) to c.getString(1) else null }
+        } catch (e: Exception) {
+            null
+        } ?: return say("Non trovo $name su WhatsApp.")
+        Hub.lastCaller.value = row.second
+        say("Chiamo ${row.second} su WhatsApp.") {
+            try {
+                startActivity(
+                    Intent(Intent.ACTION_VIEW)
+                        .setDataAndType(Uri.withAppendedPath(ContactsContract.Data.CONTENT_URI, row.first.toString()), mime)
+                        .setPackage("com.whatsapp")
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+                )
+            } catch (e: Exception) {
+                say("WhatsApp non riesce ad avviare la chiamata.")
+            }
+        }
+    }
+
+    // ---------------- viaggio e informazioni ----------------
+
+    private fun eta() {
+        val n = Hub.nav.value
+        when {
+            !n.active -> say("Non stai navigando.")
+            n.viaWaze -> say("Stai usando Waze: l'orario di arrivo lo trovi lì.")
+            n.etaText.isBlank() -> say("Sto ancora calcolando l'arrivo.")
+            else -> {
+                val rest = n.remainingText.replace(" min · ", " minuti e ").replace(" km", " chilometri")
+                say("Arrivi alle ${n.etaText}. Mancano $rest.")
+            }
+        }
+    }
+
+    private fun whereAmI() {
+        val loc = Hub.location.value ?: return say("Non ho ancora la tua posizione.")
+        scope.launch {
+            val a = withContext(Dispatchers.IO) {
+                try {
+                    @Suppress("DEPRECATION")
+                    android.location.Geocoder(this@VoiceService, java.util.Locale.ITALY).getFromLocation(loc.latitude, loc.longitude, 1)?.firstOrNull()
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            if (a == null) return@launch say("Non riesco a capire l'indirizzo in questo momento.")
+            val street = listOfNotNull(a.thoroughfare, a.subThoroughfare).joinToString(" ")
+            val town = a.locality ?: a.subAdminArea
+            say(
+                when {
+                    street.isNotBlank() && town != null -> "Sei in $street, a $town."
+                    town != null -> "Sei a $town."
+                    else -> "Sei in ${a.getAddressLine(0)}."
+                },
+            )
+        }
+    }
+
+    private fun avoid(cmd: Command.Avoid) {
+        if (cmd.highways) NavController.avoidHighways = true
+        if (cmd.tolls) NavController.avoidTolls = true
+        val what = listOfNotNull(if (cmd.highways) "autostrade" else null, if (cmd.tolls) "pedaggi" else null).joinToString(" e ")
+        if (NavController.reroute(this)) say("Ricalcolo il percorso senza $what.") else say("Va bene, nei prossimi percorsi evito $what fino alla chiusura di Tachimetro.")
+    }
+
+    private fun findParking() {
+        val n = Hub.nav.value
+        val here = Hub.location.value
+        val (lat, lng, nearDest) = when {
+            n.active && n.destLat != null && n.destLng != null -> Triple(n.destLat, n.destLng, true)
+            here != null -> Triple(here.latitude, here.longitude, false)
+            else -> return say("Non ho ancora la tua posizione.")
+        }
+        say(if (nearDest) "Cerco un parcheggio vicino alla destinazione." else "Cerco un parcheggio qui vicino.")
+        scope.launch {
+            try {
+                val q = String.format(
+                    java.util.Locale.US,
+                    "[out:json][timeout:15];nwr(around:800,%.5f,%.5f)[amenity=parking][access!~\"private|customers\"];out center 30;",
+                    lat, lng,
+                )
+                val els = Net.getJsonObject("https://overpass-api.de/api/interpreter?data=" + Net.enc(q)).getJSONArray("elements")
+                var best: Triple<Double, Double, String>? = null
+                var bestD = Float.MAX_VALUE
+                for (i in 0 until els.length()) {
+                    val e = els.getJSONObject(i)
+                    val c = e.optJSONObject("center")
+                    val plat = c?.optDouble("lat") ?: e.optDouble("lat", Double.NaN)
+                    val plng = c?.optDouble("lon") ?: e.optDouble("lon", Double.NaN)
+                    if (plat.isNaN() || plng.isNaN()) continue
+                    val d = FloatArray(1)
+                    Location.distanceBetween(lat, lng, plat, plng, d)
+                    if (d[0] < bestD) {
+                        bestD = d[0]
+                        val name = e.optJSONObject("tags")?.optString("name").orEmpty().ifBlank { "Parcheggio" }
+                        best = Triple(plat, plng, name)
+                    }
+                }
+                val b = best
+                if (b == null) {
+                    say("Non trovo parcheggi pubblici entro 800 metri.")
+                } else {
+                    Hub.send(UiAction.NavigateCoords(b.first, b.second, b.third, false))
+                    bringToFront(Screen.DASHBOARD)
+                    val where = if (nearDest) "dalla destinazione" else "da qui"
+                    say("${b.third} a ${(bestD / 10).toInt() * 10} metri $where. Ti ci porto.")
+                }
+            } catch (e: Exception) {
+                say("Non riesco a cercare i parcheggi in questo momento.")
+            }
+        }
+    }
+
+    private fun setPref(key: String, value: String) {
+        val on = value == "true"
+        scope.launch {
+            Prefs.edit(applicationContext) {
+                when (key) {
+                    "dnd" -> it[Keys.dnd] = on
+                    "fullScreen" -> it[Keys.fullScreen] = on
+                    "readMessages" -> it[Keys.readMessages] = on
+                    "cameras" -> it[Keys.cameras] = on
+                    "themeMode" -> it[Keys.themeMode] = value
+                    "wakeSensitivity" -> it[Keys.wakeSensitivity] = value
+                }
+            }
+        }
+        when (key) {
+            "dnd" -> {
+                if (on) {
+                    if (!Dnd.hasAccess(this)) return say("Per il non disturbare serve un permesso: lo trovi nelle impostazioni, sezione Auto.")
+                    Dnd.enable(this)
+                } else {
+                    Dnd.restore(this)
+                }
+                say(if (on) "Non disturbare attivato." else "Non disturbare disattivato.")
+            }
+            "fullScreen" -> say(if (on) "Schermo intero attivato." else "Schermo intero disattivato.")
+            "readMessages" -> say(if (on) "Ti leggerò i messaggi." else "Non ti leggerò più i messaggi.")
+            "cameras" -> say(if (on) "Avvisi autovelox attivati." else "Avvisi autovelox disattivati.")
+            "themeMode" -> say(when (value) { "night" -> "Tema notte."; "day" -> "Tema giorno."; else -> "Tema automatico." })
+            "wakeSensitivity" -> {
+                say(when (value) { "high" -> "Sensibilità alta."; "low" -> "Sensibilità bassa."; else -> "Sensibilità normale." }) {
+                    stopWake()
+                    main.postDelayed({ startWake() }, 500)
+                }
+            }
+        }
+    }
+
+    private fun weatherAt(place: String?) {
+        scope.launch {
+            try {
+                val (lat, lng, label) = when (place) {
+                    null -> {
+                        val loc = Hub.location.value
+                        if (loc == null) {
+                            val w = Hub.weather.value ?: return@launch say("Non ho ancora la tua posizione.")
+                            return@launch say("${w.description}, ${w.tempC.toInt()} gradi.")
+                        }
+                        Triple(loc.latitude, loc.longitude, null)
+                    }
+                    "@arrivo" -> {
+                        val n = Hub.nav.value
+                        if (!n.active || n.destLat == null || n.destLng == null) return@launch say("Non stai navigando verso una destinazione.")
+                        Triple(n.destLat, n.destLng, "All'arrivo")
+                    }
+                    else -> {
+                        val g = NavController.geocode(this@VoiceService, place) ?: return@launch say("Non trovo $place.")
+                        Triple(g.first, g.second, "A $place")
+                    }
+                }
+                val w = Weather.fetch(lat, lng)
+                if (place == null) Hub.weather.value = w
+                say((if (label != null) "$label: " else "") + "${w.description.lowercase().replaceFirstChar { it.uppercase() }}, ${w.tempC.toInt()} gradi.")
+            } catch (e: Exception) {
+                say("Il meteo non è raggiungibile in questo momento.")
+            }
+        }
+    }
+
+    private fun battery() {
+        val h = Hub.health.value
+        val pct = if (h.batteryPct >= 0) h.batteryPct else
+            (getSystemService(android.os.BatteryManager::class.java)?.getIntProperty(android.os.BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1)
+        if (pct < 0) return say("Non riesco a leggere la batteria.")
+        val extra = buildString {
+            if (h.charging) append(", in carica")
+            if (h.hot) append(". Attenzione, il telefono è caldo")
+        }
+        say("Batteria al $pct per cento$extra.")
     }
 
     private fun readMessages() {

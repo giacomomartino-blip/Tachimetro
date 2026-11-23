@@ -48,6 +48,7 @@ import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Prefs
 import it.giacomo.tachimetro.media.Apps
 import it.giacomo.tachimetro.notify.NotificationReader
+import it.giacomo.tachimetro.notify.WhatsAppSender
 import kotlinx.coroutines.launch
 
 @Composable
@@ -185,6 +186,29 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
                     Option("Non annunciarli", s.groupMode == "never") { set { it[Keys.groupMode] = "never" } }
                     Field("Preferiti, sempre annunciati (nomi separati da virgola)", s.favorites) { v -> set { it[Keys.favorites] = v } }
                     Toggle("Annuncia le chiamate e chiedi se rispondere", s.announceCalls) { v -> set { it[Keys.announceCalls] = v } }
+                    Muted("Quando detti un nuovo messaggio («scrivi a Marco che arrivo») e non dici l'app")
+                    Option("Usa WhatsApp", s.msgApp == "whatsapp") { set { it[Keys.msgApp] = "whatsapp" } }
+                    Option("Usa gli SMS", s.msgApp == "sms") { set { it[Keys.msgApp] = "sms" } }
+                    Option("Chiedimelo ogni volta", s.msgApp == "ask") { set { it[Keys.msgApp] = "ask" } }
+                    Muted("Se quella persona ti ha appena scritto, Tachimetro risponde dalla notifica e invia da solo, su qualunque app.")
+                    if (refresh >= 0) {
+                        val waOn = WhatsAppSender.isEnabled(context)
+                        Toggle("WhatsApp: premi Invia al posto mio", s.waAutoSend) { v ->
+                            set { it[Keys.waAutoSend] = v }
+                            if (v && !waOn) WhatsAppSender.openSettings(context)
+                        }
+                        Muted(
+                            if (s.waAutoSend && !waOn) {
+                                "Manca un passaggio: in Accessibilità, App installate, attiva «Tachimetro, invio WhatsApp a voce». " +
+                                    "Se è grigio, apri Impostazioni, App, Tachimetro, menu in alto a destra, «Consenti impostazioni con restrizioni», poi riprova."
+                            } else if (s.waAutoSend) {
+                                "Attivo. Agisce solo dentro WhatsApp e solo per pochi secondi dopo che hai detto «sì, invialo»."
+                            } else {
+                                "Spento: per i nuovi messaggi WhatsApp Tachimetro apre la chat con il testo già scritto e tu tocchi Invia."
+                            },
+                        )
+                        if (s.waAutoSend && !waOn) Btn("Apri Accessibilità") { WhatsAppSender.openSettings(context); refresh++ }
+                    }
                 }
             }
             item {

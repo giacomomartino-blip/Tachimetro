@@ -20,6 +20,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.google.android.libraries.navigation.ForceNightMode
 import com.google.android.libraries.navigation.NavigationApi
 import com.google.android.libraries.navigation.NavigationView
+import com.google.android.libraries.navigation.RoutingOptions
 import com.google.android.libraries.navigation.Navigator
 import com.google.android.libraries.navigation.SpeedAlertOptions
 import com.google.android.libraries.navigation.SpeedAlertSeverity
@@ -43,6 +44,9 @@ object NavController {
     var speedAlertMode = "tone"
     var tolerance = 5
     var onSpeedingTone: (() -> Unit)? = null
+    var avoidHighways = false
+    var avoidTolls = false
+    private var lastDest: Triple<Double, Double, String>? = null
     private var lastTone = 0L
     private var initializing = false
 
@@ -135,14 +139,16 @@ object NavController {
             }
             // senza mappa integrata si usa l'app Google Maps
             openGoogleMaps(context, lat, lng, false)
-            Hub.nav.value = NavUi(active = true, destination = title)
+            Hub.nav.value = NavUi(active = true, destination = title, destLat = lat, destLng = lng)
             return
         }
+        lastDest = Triple(lat, lng, title)
         val wp = Waypoint.builder().setLatLng(lat, lng).setTitle(title).build()
-        n.setDestination(wp).setOnResultListener { status ->
+        val options = RoutingOptions().avoidHighways(avoidHighways).avoidTolls(avoidTolls)
+        n.setDestination(wp, options).setOnResultListener { status ->
             if (status == Navigator.RouteStatus.OK) {
                 n.startGuidance()
-                Hub.nav.value = NavUi(active = true, destination = title)
+                Hub.nav.value = NavUi(active = true, destination = title, destLat = lat, destLng = lng)
             } else {
                 Hub.nav.value = NavUi()
                 Hub.mapsStatus.value = "Percorso non trovato verso $title"
@@ -163,6 +169,14 @@ object NavController {
         navigator = null
         initializing = false
         pending = null
+    }
+
+    /** Ricalcola il percorso attuale con le nuove preferenze (autostrade, pedaggi). */
+    fun reroute(context: Context): Boolean {
+        val d = lastDest ?: return false
+        if (!Hub.nav.value.active) return false
+        go(context, d.first, d.second, d.third)
+        return true
     }
 
     fun stop() {

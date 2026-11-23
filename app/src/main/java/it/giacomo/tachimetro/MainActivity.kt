@@ -83,6 +83,7 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.POST_NOTIFICATIONS,
         Manifest.permission.READ_CONTACTS,
         Manifest.permission.CALL_PHONE,
+        Manifest.permission.SEND_SMS,
         Manifest.permission.READ_CALENDAR,
         Manifest.permission.BLUETOOTH_CONNECT,
         Manifest.permission.READ_PHONE_STATE,

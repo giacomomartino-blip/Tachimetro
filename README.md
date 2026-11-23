@@ -17,14 +17,18 @@ Gli aggiornamenti si installano sopra la versione precedente senza perdere le im
 
 | Per | Di' |
 |---|---|
-| Navigare | «portami a casa», «portami in via Roma 10 a Napoli», «portami a casa con Waze», «torna a Google Maps», «ferma la navigazione» |
+| Navigare | «portami a casa», «imposta il percorso per Caserta», «come arrivo a via Toledo», «portami a casa con Waze», «torna a Google Maps», «ferma la navigazione» |
+| Durante il viaggio | «quanto manca?», «dove sono?», «evita le autostrade», «evita i pedaggi», «cerca un parcheggio», «che tempo fa all'arrivo?», «ci sono autovelox?» |
 | Musica | «metti Vasco su Spotify», «metti la playlist viaggio», «pausa», «riprendi», «avanti», «alza il volume» |
-| Radio | «metti Radio Deejay», «metti radio RTL», «radio successiva» |
-| Telefono | «chiama Luca», «leggi i messaggi», «rispondi», «entra nella riunione»; alle chiamate in arrivo rispondi sì o no |
-| App | «apri WhatsApp», «cerca Stranger Things su Netflix», «aggiungi Calendario alla barra» |
-| Auto | «dov'è la macchina?», «trova benzina qui vicino», «portami al primo», «che tempo fa» |
+| Radio | «metti Radio Deejay», «radio RTL», «passa a Radio 105», «cambia radio» |
+| Chiamate | «chiama Luca», «chiama Luca su WhatsApp», «richiama», «rifiuta»; alle chiamate in arrivo rispondi sì o no |
+| Messaggi | «scrivi a Marco che arrivo tra dieci minuti», «manda un SMS a Luca», «manda un WhatsApp a Anna», «leggi i messaggi», «rispondi»; prima di inviare Tachi rilegge il testo e chiede conferma, e se dici «correggi» lo riscrivi |
+| App | «apri WhatsApp», «cerca Stranger Things su Netflix», «aggiungi Calendario alla barra», «entra nella riunione» |
+| Auto | «dov'è la macchina?», «salva il parcheggio», «ricordami le strisce tra un'ora», «trova benzina qui vicino», «portami al primo» |
+| Informazioni | «che ore sono?», «che tempo fa a Napoli?», «quanta batteria ho?» |
+| Impostazioni a voce | «attiva il non disturbare», «disattiva lettura messaggi», «tema notte», «sensibilità alta» |
 | Modalità | «modalità passeggero», «modalità guidatore», «silenzia avvisi», «chiudi Tachimetro» |
-| Altro | qualsiasi domanda va a Gemini |
+| Altro | le domande vere («chi ha vinto…», «quanto è alto…») vanno a Gemini; se Tachi non capisce un comando te lo dice |
 
 ## Cosa fa questa versione
 
@@ -66,3 +70,10 @@ La chiave di firma e la chiave di Google Maps non sono nel repository: stanno ne
 | `MAPS_API_KEY` | chiave di Google Maps |
 
 La compilazione si ferma con un messaggio chiaro se un segreto manca o è sbagliato, e controlla che la firma dell'APK sia sempre la stessa (SHA-1 `75:E5:05:09:3B:47:A8:09:8E:E1:B0:9A:E6:E6:B4:84:80:19:25:DB`): se cambiasse, Android non accetterebbe più gli aggiornamenti. Conserva una copia della chiave di firma in un posto sicuro fuori da GitHub.
+
+## Messaggi WhatsApp a voce
+
+Se la persona ti ha appena scritto, Tachimetro risponde dalla notifica e invia da solo, come per SMS e Teams. Per un messaggio nuovo su WhatsApp ci sono due modi, da scegliere in Impostazioni, Messaggi e chiamate:
+
+1. spento (predefinito): Tachimetro apre la chat con il testo già scritto e tu tocchi Invia;
+2. «WhatsApp: premi Invia al posto mio»: dopo il tuo «sì» Tachimetro preme Invia e torna al cruscotto. Va attivato una volta in Accessibilità del telefono; se la voce è grigia, apri Impostazioni, App, Tachimetro, menu in alto a destra, «Consenti impostazioni con restrizioni». Agisce solo dentro WhatsApp e solo per pochi secondi dopo la conferma.

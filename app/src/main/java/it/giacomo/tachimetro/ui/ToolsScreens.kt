@@ -51,6 +51,7 @@ import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Prefs
 import it.giacomo.tachimetro.notify.NotificationReader
+import it.giacomo.tachimetro.notify.WhatsAppSender
 import it.giacomo.tachimetro.voice.VoiceService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -238,6 +239,14 @@ fun StatusScreen(s: AppSettings) {
             StatusRow("Contatti e chiamate in uscita", contacts, if (contacts) "Pronti" else "Permessi mancanti")
             val cal = granted(context, Manifest.permission.READ_CALENDAR)
             StatusRow("Calendario", cal, if (cal) "Pronto per le riunioni Teams" else "Permesso mancante")
+            val sms = granted(context, Manifest.permission.SEND_SMS)
+            StatusRow("Invio SMS a voce", sms, if (sms) "Pronto" else "Permesso mancante")
+            val wa = WhatsAppSender.isEnabled(context)
+            StatusRow(
+                "Invio WhatsApp a voce",
+                if (!s.waAutoSend) null else wa,
+                if (!s.waAutoSend) "Apre la chat pronta, tocchi tu Invia" else if (wa) "Invia da solo" else "Da attivare in Accessibilità",
+            )
         }
         Muted("Se qualcosa non va, manda uno screenshot di questa pagina.", 14.sp)
     }
