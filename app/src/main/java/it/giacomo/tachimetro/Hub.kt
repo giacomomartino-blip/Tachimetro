@@ -7,10 +7,14 @@ import it.giacomo.tachimetro.data.FuelStation
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 
-enum class Screen { DASHBOARD, PASSENGER, SETTINGS, APP_BAR, PARKING, FUEL }
+enum class Screen { DASHBOARD, PASSENGER, SETTINGS, APP_BAR, PARKING, FUEL, SETUP, STATUS, WAKE_TEST }
 
 /** Stato del collegamento con l'auto: in modalità guidatore Tachimetro si attiva solo con l'auto collegata. */
-enum class CarGate { CHECKING, READY, WAITING, NOT_SET, NO_PERMISSION }
+enum class CarGate { CHECKING, READY, WAITING, ASK, NOT_SET, NO_PERMISSION }
+
+data class BtDevice(val address: String, val name: String, val isCar: Boolean)
+
+data class IncomingCall(val key: String, val caller: String, val time: Long)
 
 data class WeatherNow(val tempC: Double, val description: String, val code: Int)
 
@@ -71,6 +75,9 @@ sealed interface UiAction {
     data class Show(val screen: Screen) : UiAction
     data class SetMode(val driver: Boolean) : UiAction
     data object Close : UiAction
+    data object StayOpen : UiAction
+    data object TestWithoutCar : UiAction
+    data class CarAnswer(val device: BtDevice, val isCar: Boolean) : UiAction
 }
 
 /** Punto di incontro tra il servizio vocale, i lettori di notifiche e l'interfaccia. */
@@ -88,6 +95,13 @@ object Hub {
     val mapsStatus = MutableStateFlow<String?>(null)
     val speeding = MutableStateFlow(false)
     val carGate = MutableStateFlow(CarGate.CHECKING)
+    val carName = MutableStateFlow("")
+    val askCar = MutableStateFlow<BtDevice?>(null)
+    val testMode = MutableStateFlow(false)
+    val closingIn = MutableStateFlow<Int?>(null)
+    val wakeHeard = MutableStateFlow("")
+    val wakeDetectedAt = MutableStateFlow(0L)
+    val incomingCall = MutableStateFlow<IncomingCall?>(null)
     val fuel = MutableStateFlow<List<FuelStation>>(emptyList())
     val actions = MutableSharedFlow<UiAction>(extraBufferCapacity = 16)
 

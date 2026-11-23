@@ -48,6 +48,16 @@ data class AppSettings(
     val keepScreenOn: Boolean = true,
     val fullScreen: Boolean = true,
     val requireCar: Boolean = true,
+    /** Auto conosciute, ognuna come "indirizzo|nome". */
+    val knownCars: List<String> = emptyList(),
+    /** Dispositivi Bluetooth per cui hai risposto «non è l'auto». */
+    val notCars: List<String> = emptyList(),
+    val setupDone: Boolean = false,
+    val wakeSensitivity: String = "normal",  // low, normal, high
+    val dnd: Boolean = true,
+    val groupMode: String = "ask",           // ask, name, never
+    val favorites: String = "",
+    val announceCalls: Boolean = true,
     val burnIn: Boolean = true,
     val saveParking: Boolean = true,
     val healthAlerts: Boolean = true,
@@ -85,6 +95,14 @@ object Keys {
     val keepScreenOn = booleanPreferencesKey("keepScreenOn")
     val fullScreen = booleanPreferencesKey("fullScreen")
     val requireCar = booleanPreferencesKey("requireCar")
+    val knownCars = stringPreferencesKey("knownCars")
+    val notCars = stringPreferencesKey("notCars")
+    val setupDone = booleanPreferencesKey("setupDone")
+    val wakeSensitivity = stringPreferencesKey("wakeSensitivity")
+    val dnd = booleanPreferencesKey("dnd")
+    val groupMode = stringPreferencesKey("groupMode")
+    val favorites = stringPreferencesKey("favorites")
+    val announceCalls = booleanPreferencesKey("announceCalls")
     val burnIn = booleanPreferencesKey("burnIn")
     val saveParking = booleanPreferencesKey("saveParking")
     val healthAlerts = booleanPreferencesKey("healthAlerts")
@@ -124,6 +142,18 @@ private fun Preferences.toSettings(): AppSettings {
         keepScreenOn = this[Keys.keepScreenOn] ?: d.keepScreenOn,
         fullScreen = this[Keys.fullScreen] ?: d.fullScreen,
         requireCar = this[Keys.requireCar] ?: d.requireCar,
+        knownCars = (this[Keys.knownCars]?.split("\n")?.filter { it.isNotBlank() } ?: emptyList()).let { list ->
+            // auto scelta con la versione precedente
+            val old = this[Keys.carBtAddress].orEmpty()
+            if (old.isNotBlank() && list.none { it.startsWith(old, true) }) list + (old + "|" + (this[Keys.carBtName] ?: old)) else list
+        },
+        notCars = this[Keys.notCars]?.split("\n")?.filter { it.isNotBlank() } ?: emptyList(),
+        setupDone = this[Keys.setupDone] ?: d.setupDone,
+        wakeSensitivity = this[Keys.wakeSensitivity] ?: d.wakeSensitivity,
+        dnd = this[Keys.dnd] ?: d.dnd,
+        groupMode = this[Keys.groupMode] ?: d.groupMode,
+        favorites = this[Keys.favorites] ?: d.favorites,
+        announceCalls = this[Keys.announceCalls] ?: d.announceCalls,
         burnIn = this[Keys.burnIn] ?: d.burnIn,
         saveParking = this[Keys.saveParking] ?: d.saveParking,
         healthAlerts = this[Keys.healthAlerts] ?: d.healthAlerts,
@@ -144,6 +174,27 @@ object Prefs {
 
     suspend fun edit(context: Context, block: (MutablePreferences) -> Unit) {
         context.dataStore.edit { block(it) }
+    }
+
+    suspend fun addKnownCar(context: Context, address: String, name: String) {
+        val cur = get(context).knownCars.filterNot { it.startsWith(address, true) }
+        edit(context) {
+            it[Keys.knownCars] = (cur + "$address|$name").joinToString("\n")
+            it[Keys.carBtAddress] = ""
+        }
+    }
+
+    suspend fun removeKnownCar(context: Context, address: String) {
+        val cur = get(context).knownCars.filterNot { it.startsWith(address, true) }
+        edit(context) {
+            it[Keys.knownCars] = cur.joinToString("\n")
+            it[Keys.carBtAddress] = ""
+        }
+    }
+
+    suspend fun addNotCar(context: Context, address: String) {
+        val cur = get(context).notCars.filterNot { it.equals(address, true) }
+        edit(context) { it[Keys.notCars] = (cur + address).joinToString("\n") }
     }
 
     suspend fun setBar(context: Context, passenger: Boolean, items: List<String>) {

@@ -36,7 +36,7 @@ class CarBluetoothReceiver : BroadcastReceiver() {
         carScope.launch {
             try {
                 val s = Prefs.get(context)
-                if (s.carBtAddress.isBlank() || !s.carBtAddress.equals(address, true)) return@launch
+                if (s.knownCars.none { it.startsWith(address, true) }) return@launch
                 when (intent.action) {
                     BluetoothDevice.ACTION_ACL_CONNECTED -> if (s.autoStart) Car.openApp(context)
                     BluetoothDevice.ACTION_ACL_DISCONNECTED -> if (s.saveParking) {

@@ -8,6 +8,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import it.giacomo.tachimetro.Hub
+import it.giacomo.tachimetro.IncomingCall
 import it.giacomo.tachimetro.IncomingMessage
 import it.giacomo.tachimetro.media.MediaSessions
 
@@ -31,8 +32,12 @@ class NotificationReader : NotificationListenerService() {
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification) {
-        val app = appName(sbn.packageName) ?: return
         val n = sbn.notification
+        if (n.category == Notification.CATEGORY_CALL) {
+            onCall(sbn)
+            return
+        }
+        val app = appName(sbn.packageName) ?: return
         if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return
         val extras = n.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
@@ -72,6 +77,35 @@ class NotificationReader : NotificationListenerService() {
                 remoteInput = remote,
             ),
         )
+    }
+
+    /** Chiamata in arrivo: il nome lo prende dalla notifica del telefono. */
+    private fun onCall(sbn: StatusBarNotification) {
+        val n = sbn.notification
+        val extras = n.extras
+        val type = extras.getInt(Notification.EXTRA_CALL_TYPE, 0)
+        val ringing = type == Notification.CallStyle.CALL_TYPE_INCOMING || isRinging()
+        if (!ringing) return
+        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+        val text = extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim().orEmpty()
+        val caller = (if (title.isBlank() || title.contains("chiamata", true) || title.contains("call", true)) text else title)
+            .ifBlank { "numero sconosciuto" }
+        if (Hub.incomingCall.value?.key == sbn.key) return
+        Hub.incomingCall.value = IncomingCall(sbn.key, caller, System.currentTimeMillis())
+    }
+
+    private fun isRinging(): Boolean {
+        if (checkSelfPermission(android.Manifest.permission.READ_PHONE_STATE) != android.content.pm.PackageManager.PERMISSION_GRANTED) return false
+        return try {
+            @Suppress("DEPRECATION")
+            getSystemService(android.telephony.TelephonyManager::class.java)?.callState == android.telephony.TelephonyManager.CALL_STATE_RINGING
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        if (Hub.incomingCall.value?.key == sbn.key) Hub.incomingCall.value = null
     }
 
     private fun lastMessageSender(extras: Bundle): String? {

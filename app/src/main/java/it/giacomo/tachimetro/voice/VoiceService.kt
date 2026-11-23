@@ -29,6 +29,7 @@ import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
 import it.giacomo.tachimetro.CameraAlert
 import it.giacomo.tachimetro.Hub
+import it.giacomo.tachimetro.IncomingCall
 import it.giacomo.tachimetro.IncomingMessage
 import it.giacomo.tachimetro.MainActivity
 import it.giacomo.tachimetro.R
@@ -37,6 +38,7 @@ import it.giacomo.tachimetro.TachiApp
 import it.giacomo.tachimetro.UiAction
 import it.giacomo.tachimetro.VoicePhase
 import it.giacomo.tachimetro.VoiceUi
+import it.giacomo.tachimetro.car.Dnd
 import it.giacomo.tachimetro.car.PhoneHealthMonitor
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Gemini
@@ -90,11 +92,13 @@ class VoiceService : Service() {
         data class AskReply(val msg: IncomingMessage) : Dialog
         data class ReplyText(val msg: IncomingMessage) : Dialog
         data class ReplyConfirm(val msg: IncomingMessage, val text: String) : Dialog
+        data class AskAnswer(val call: IncomingCall) : Dialog
     }
 
     private var dialog: Dialog? = null
     private var dialogRetry = 0
-    private val pendingMessages = ArrayDeque<IncomingMessage>()
+    /** Coda dei messaggi da annunciare; il secondo valore indica «dimmi solo chi ha scritto». */
+    private val pendingMessages = ArrayDeque<Pair<IncomingMessage, Boolean>>()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -107,6 +111,7 @@ class VoiceService : Service() {
         MediaSessions.start(applicationContext)
         scope.launch { Prefs.flow(applicationContext).collect { settings = it } }
         scope.launch { Hub.messages.collect { onMessages(it) } }
+        scope.launch { Hub.incomingCall.collect { onIncomingCall(it) } }
         startLocation()
         loadModel()
     }
@@ -122,6 +127,7 @@ class VoiceService : Service() {
 
     /** L'app è stata chiusa dall'elenco delle app recenti: si spegne tutto. */
     override fun onTaskRemoved(rootIntent: Intent?) {
+        Dnd.restore(this)
         NotificationReader.unbind()
         MediaSessions.stop()
         stopSelf()
@@ -203,7 +209,12 @@ class VoiceService : Service() {
             return
         }
         try {
-            val rec = Recognizer(m, 16000f, WAKE_GRAMMAR)
+            val grammar = when (settings.wakeSensitivity) {
+                "low" -> WAKE_GRAMMAR_LOW
+                "high" -> WAKE_GRAMMAR_HIGH
+                else -> WAKE_GRAMMAR
+            }
+            val rec = Recognizer(m, 16000f, grammar)
             wake = SpeechService(rec, 16000f).also { it.startListening(wakeListener) }
             Hub.voice.value = VoiceUi(VoicePhase.WAITING_WAKE)
         } catch (e: Exception) {
@@ -236,13 +247,22 @@ class VoiceService : Service() {
 
         private fun check(json: String?, field: String) {
             val text = try { JSONObject(json ?: return).optString(field) } catch (e: Exception) { return }
-            if (isWake(text)) main.post { onWake() }
+            if (text.isNotBlank()) Hub.wakeHeard.value = text
+            if (isWake(text, field == "partial")) main.post {
+                Hub.wakeDetectedAt.value = System.currentTimeMillis()
+                onWake()
+            }
         }
     }
 
-    private fun isWake(text: String): Boolean {
+    /** Sensibilità: bassa vuole «ehi» + parola sulla frase finita, alta accetta anche varianti più lontane. */
+    private fun isWake(text: String, partial: Boolean): Boolean {
         val t = text.lowercase()
-        return WAKE_WORDS.any { t.contains(it) }
+        return when (settings.wakeSensitivity) {
+            "low" -> !partial && Regex("(ehi|hey|hei) (tachi|tacchi|taxi|ta chi)").containsMatchIn(t)
+            "high" -> (WAKE_WORDS + listOf("taki", "tacci", "tachy", "tazzi", "dacchi")).any { t.contains(it) }
+            else -> WAKE_WORDS.any { t.contains(it) }
+        }
     }
 
     private fun onWake() {
@@ -451,6 +471,20 @@ class VoiceService : Service() {
                     ask("Ho scritto: $text. Lo invio?")
                 }
             }
+            is Dialog.AskAnswer -> when (yesNo(text)) {
+                true -> {
+                    dialog = null
+                    dialogRetry = 0
+                    answerCall(true)
+                }
+                false -> {
+                    dialog = null
+                    dialogRetry = 0
+                    answerCall(false)
+                    say("Rifiutata.")
+                }
+                null -> if (Hub.incomingCall.value != null) retryOrDrop(d, "Rispondo?") else { dialog = null; endCommand() }
+            }
             is Dialog.ReplyConfirm -> when (yesNo(text)) {
                 true -> {
                     val ok = NotificationReader.reply(this, d.msg, d.text)
@@ -475,10 +509,58 @@ class VoiceService : Service() {
 
     /** Passa al prossimo messaggio in coda, se non sei già impegnato con un altro. */
     private fun nextPendingMessage() {
-        if (dialog != null || listeningCommand || speaker.speaking) return
-        val m = pendingMessages.removeFirstOrNull() ?: return
+        if (dialog != null || listeningCommand || speaker.speaking || Hub.incomingCall.value != null) return
+        val (m, nameOnly) = pendingMessages.removeFirstOrNull() ?: return
         if (Hub.messages.value.none { it.key == m.key }) return nextPendingMessage()
-        announce(m)
+        if (nameOnly) {
+            say("Messaggio da ${who(m)}.") { main.postDelayed({ nextPendingMessage() }, 800) }
+        } else {
+            announce(m)
+        }
+    }
+
+    private fun isFavorite(name: String): Boolean {
+        val favs = settings.favorites.split(",").map { it.trim().lowercase() }.filter { it.isNotBlank() }
+        val n = name.lowercase()
+        return favs.any { n.contains(it) }
+    }
+
+    // ---------------- chiamate in arrivo ----------------
+
+    private fun onIncomingCall(call: IncomingCall?) {
+        if (call == null) {
+            // ha già risposto o la chiamata è finita: smetto di chiedere
+            if (dialog is Dialog.AskAnswer) {
+                dialog = null
+                dialogRetry = 0
+                recognizer?.cancel()
+                speaker.stop()
+                listeningCommand = false
+                main.postDelayed({ startWake() }, 1500)
+            }
+            return
+        }
+        if (!settings.announceCalls || settings.mode != "driver") return
+        stopWake()
+        recognizer?.cancel()
+        speaker.stop()
+        dialogRetry = 0
+        dialog = Dialog.AskAnswer(call)
+        ask("Chiamata da ${call.caller}. Rispondo?")
+    }
+
+    @Suppress("DEPRECATION")
+    private fun answerCall(accept: Boolean) {
+        if (!granted(Manifest.permission.ANSWER_PHONE_CALLS)) {
+            say("Mi manca il permesso per rispondere alle chiamate.")
+            return
+        }
+        try {
+            val tm = getSystemService(android.telecom.TelecomManager::class.java)
+            if (accept) tm?.acceptRingingCall() else tm?.endCall()
+        } catch (e: SecurityException) {
+        }
+        listeningCommand = false
     }
 
     private fun bringToFront(screen: Screen? = null) {
@@ -659,7 +741,7 @@ class VoiceService : Service() {
         val list = Hub.messages.value
         if (list.isEmpty()) return say("Nessun messaggio nuovo.")
         pendingMessages.clear()
-        pendingMessages.addAll(list.drop(1))
+        list.drop(1).forEach { pendingMessages.addLast(it to false) }
         announce(list.first())
     }
 
@@ -668,7 +750,17 @@ class VoiceService : Service() {
             if (!announced.add(m.key)) continue
             if (!settings.readMessages || settings.mode != "driver") continue
             if (System.currentTimeMillis() - m.time > 120_000) continue
-            pendingMessages.addLast(m)
+            val fav = isFavorite(m.sender)
+            if (m.group != null && !fav) {
+                when (settings.groupMode) {
+                    "never" -> continue
+                    "name" -> {
+                        pendingMessages.addLast(m to true)
+                        continue
+                    }
+                }
+            }
+            pendingMessages.addLast(m to false)
         }
         if (announced.size > 300) announced.clear()
         nextPendingMessage()
@@ -826,6 +918,9 @@ class VoiceService : Service() {
         var running = false
 
         private val WAKE_WORDS = listOf("tachi", "tacchi", "taxi", "ta chi")
+        private const val WAKE_GRAMMAR_LOW = "[\"ehi tachi\", \"ehi tacchi\", \"ehi taxi\", \"[unk]\"]"
+        private const val WAKE_GRAMMAR_HIGH =
+            "[\"ehi tachi\", \"ehi tacchi\", \"ehi taxi\", \"hey tacchi\", \"e tacchi\", \"ehi ta chi\", \"tacchi\", \"taxi\", \"tachi\", \"[unk]\"]"
         private const val WAKE_GRAMMAR =
             "[\"ehi tachi\", \"ehi tacchi\", \"ehi taxi\", \"hey tacchi\", \"e tacchi\", \"ehi ta chi\", \"[unk]\"]"
 

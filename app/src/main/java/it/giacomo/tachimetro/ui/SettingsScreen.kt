@@ -41,6 +41,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.datastore.preferences.core.MutablePreferences
 import it.giacomo.tachimetro.Hub
+import it.giacomo.tachimetro.car.Dnd
 import it.giacomo.tachimetro.Screen
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
@@ -105,7 +106,11 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
                 T("Tachimetro", 13.sp, FontWeight.Bold, p.acc)
                 T("Impostazioni", 28.sp, FontWeight.ExtraBold)
             }
-            Btn("Torna al cruscotto") { Hub.screen.value = if (s.mode == "passenger") Screen.PASSENGER else Screen.DASHBOARD }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Btn("Stato") { Hub.screen.value = Screen.STATUS }
+                Btn("Configurazione guidata") { Hub.screen.value = Screen.SETUP }
+                Btn("Torna al cruscotto", true) { Hub.screen.value = if (s.mode == "passenger") Screen.PASSENGER else Screen.DASHBOARD }
+            }
         }
         LazyVerticalStaggeredGrid(
             columns = StaggeredGridCells.Adaptive(300.dp),
@@ -160,9 +165,26 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
             item {
                 Section("Voce") {
                     Row2("Parola chiave", "Ehi Tachi", true)
+                    Muted("Sensibilità")
+                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        listOf("low" to "Bassa", "normal" to "Normale", "high" to "Alta").forEach { (k, l) ->
+                            Chip(l, s.wakeSensitivity == k) { set { it[Keys.wakeSensitivity] = k } }
+                        }
+                    }
+                    Btn("Prova la parola chiave", icon = Ic.mic) { Hub.screen.value = Screen.WAKE_TEST }
                     Toggle("Leggi WhatsApp, SMS e Teams", s.readMessages) { v -> set { it[Keys.readMessages] = v } }
                     Field("Chiave di Gemini (facoltativa)", s.geminiKey, secret = true) { v -> set { it[Keys.geminiKey] = v.trim() } }
                     Muted("Con la chiave, le domande generali ricevono una risposta letta ad alta voce. Senza chiave si apre l'assistente del telefono. Gemini riceve solo il testo della domanda.")
+                }
+            }
+            item {
+                Section("Messaggi e chiamate") {
+                    Muted("Messaggi dei gruppi")
+                    Option("Annuncia e chiedi se leggere", s.groupMode == "ask") { set { it[Keys.groupMode] = "ask" } }
+                    Option("Dimmi solo chi ha scritto", s.groupMode == "name") { set { it[Keys.groupMode] = "name" } }
+                    Option("Non annunciarli", s.groupMode == "never") { set { it[Keys.groupMode] = "never" } }
+                    Field("Preferiti, sempre annunciati (nomi separati da virgola)", s.favorites) { v -> set { it[Keys.favorites] = v } }
+                    Toggle("Annuncia le chiamate e chiedi se rispondere", s.announceCalls) { v -> set { it[Keys.announceCalls] = v } }
                 }
             }
             item {
@@ -240,18 +262,37 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
             }
             item {
                 Section("Auto") {
-                    Muted("Bluetooth dell'auto, per l'apertura automatica e il parcheggio")
-                    val devices = remember(refresh) { bondedDevices(context) }
-                    if (devices.isEmpty()) Muted("Nessun dispositivo Bluetooth associato, oppure manca il permesso")
-                    devices.forEach { (name, addr) ->
-                        Option(name, s.carBtAddress.equals(addr, true)) {
-                            set {
-                                it[Keys.carBtAddress] = addr
-                                it[Keys.carBtName] = name
+                    Muted("Autoradio e vivavoce li riconosco da solo. Gli altri dispositivi li chiedo una volta e poi li ricordo.")
+                    if (s.knownCars.isEmpty()) Muted("Nessuna auto ancora riconosciuta")
+                    s.knownCars.forEach { entry ->
+                        val addr = entry.substringBefore('|')
+                        val name = entry.substringAfter('|', addr)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            androidx.compose.material3.Icon(Ic.car, null, tint = p.acc, modifier = Modifier.width(22.dp))
+                            T(name, 14.sp, FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1)
+                            RoundBtn(Ic.x, "Dimentica $name", 44.dp) { scope.launch { Prefs.removeKnownCar(context, addr) } }
+                        }
+                    }
+                    var showAdd by remember { mutableStateOf(false) }
+                    if (!showAdd) {
+                        Btn("Aggiungi un'auto a mano") { showAdd = true }
+                    } else {
+                        val devices = remember(refresh) { bondedDevices(context) }
+                        if (devices.isEmpty()) Muted("Nessun dispositivo Bluetooth associato, oppure manca il permesso")
+                        devices.filter { d -> s.knownCars.none { it.startsWith(d.second, true) } }.forEach { (name, addr) ->
+                            Option(name, false) {
+                                scope.launch { Prefs.addKnownCar(context, addr, name) }
+                                showAdd = false
                             }
                         }
                     }
                     Toggle("Attiva solo con il Bluetooth dell'auto (guidatore)", s.requireCar) { v -> set { it[Keys.requireCar] = v } }
+                    Toggle("Non disturbare mentre guidi", s.dnd) { v -> set { it[Keys.dnd] = v } }
+                    if (s.dnd && !Dnd.hasAccess(context)) {
+                        Btn("Consenti a Tachimetro di gestire Non disturbare", true) {
+                            context.startActivity(Intent(Settings.ACTION_NOTIFICATION_POLICY_ACCESS_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                        }
+                    }
                     Toggle("Meteo e temperatura esterna", s.weatherOn) { v -> set { it[Keys.weatherOn] = v } }
                     Toggle("Apri da solo quando entro in auto", s.autoStart) { v -> set { it[Keys.autoStart] = v } }
                     Toggle("Schermo intero, senza barre di Android", s.fullScreen) { v -> set { it[Keys.fullScreen] = v } }

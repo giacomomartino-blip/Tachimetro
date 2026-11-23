@@ -53,6 +53,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import it.giacomo.tachimetro.BuildConfig
+import it.giacomo.tachimetro.CarGate
 import it.giacomo.tachimetro.Hub
 import it.giacomo.tachimetro.Screen
 import it.giacomo.tachimetro.UiAction
@@ -355,6 +356,25 @@ fun MessagesPanel() {
 @Composable
 fun StatusCards(s: AppSettings) {
     val p = LocalPal.current
+    val closing by Hub.closingIn.collectAsState()
+    val test by Hub.testMode.collectAsState()
+    closing?.let { secs ->
+        CardBox(pad = 12.dp) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                IconBox(Ic.car, p.voice, p.onVoice, 40.dp)
+                Column(Modifier.weight(1f)) {
+                    T("Auto scollegata: chiudo tra $secs s", 15.sp, FontWeight.ExtraBold)
+                    Muted("Parcheggio salvato. Se l'auto si ricollega resto aperto")
+                }
+                Btn("Resta aperto", height = 44.dp) { Hub.send(UiAction.StayOpen) }
+            }
+        }
+    }
+    if (test && s.mode != "passenger" && s.requireCar) {
+        CardBox(pad = 10.dp) {
+            Muted("Modalità prova senza auto: resta attiva finché non chiudi Tachimetro")
+        }
+    }
     val nav by Hub.nav.collectAsState()
     val cam by Hub.camera.collectAsState()
     val health by Hub.health.collectAsState()
@@ -644,13 +664,14 @@ fun PassengerScreen(s: AppSettings, night: Boolean) {
 // ---------------- in attesa dell'auto ----------------
 
 @Composable
-fun WaitingForCar(gate: it.giacomo.tachimetro.CarGate, carName: String) {
+fun WaitingForCar(gate: CarGate) {
     val p = LocalPal.current
+    val ask by Hub.askCar.collectAsState()
     val (title, text) = when (gate) {
-        it.giacomo.tachimetro.CarGate.NOT_SET -> "Scegli la tua auto" to "Nelle impostazioni, alla voce Auto, tocca il Bluetooth della tua auto. Tachimetro si attiverà solo quando il telefono è collegato."
-        it.giacomo.tachimetro.CarGate.NO_PERMISSION -> "Serve il permesso Bluetooth" to "Senza il permesso Bluetooth Tachimetro non può sapere se sei in auto. Concedilo nelle impostazioni, alla voce Permessi."
-        it.giacomo.tachimetro.CarGate.CHECKING -> "Controllo il collegamento…" to "Un attimo."
-        else -> "Collega il Bluetooth dell'auto" to "Tachimetro si attiva quando il telefono è collegato a ${carName.ifBlank { "la tua auto" }}. Finché non lo è, microfono, GPS e servizi restano spenti."
+        CarGate.ASK -> "Sei in auto con ${ask?.name ?: "questo dispositivo"}?" to "Rispondi a voce o con i pulsanti. Se dici sì lo ricordo e la prossima volta mi attivo da solo."
+        CarGate.NO_PERMISSION -> "Serve il permesso Bluetooth" to "Senza il permesso Bluetooth non posso sapere se sei in auto. Concedilo nelle impostazioni, alla voce Permessi."
+        CarGate.CHECKING -> "Controllo il Bluetooth…" to "Un attimo."
+        else -> "In attesa dell'auto" to "Mi attivo appena il telefono si collega al Bluetooth dell'auto: autoradio e vivavoce li riconosco da solo. Finché aspetto, microfono, GPS e servizi restano spenti."
     }
     Box(Modifier.fillMaxSize().background(p.bg), contentAlignment = Alignment.Center) {
         Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.padding(28.dp)) {
@@ -658,8 +679,19 @@ fun WaitingForCar(gate: it.giacomo.tachimetro.CarGate, carName: String) {
             T("Tachimetro", 15.sp, FontWeight.Bold, p.acc)
             T(title, 26.sp, FontWeight.ExtraBold)
             Muted(text, 15.sp)
+            val dev = ask
+            if (gate == CarGate.ASK && dev != null) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Btn("Sì, è l'auto", true, Modifier.width(200.dp), 56.dp) { Hub.send(UiAction.CarAnswer(dev, true)) }
+                    Btn("No", false, Modifier.width(140.dp), 56.dp) { Hub.send(UiAction.CarAnswer(dev, false)) }
+                }
+            }
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                Btn("Impostazioni", gate == it.giacomo.tachimetro.CarGate.NOT_SET || gate == it.giacomo.tachimetro.CarGate.NO_PERMISSION, icon = Ic.gear) { Hub.screen.value = Screen.SETTINGS }
+                Btn("Prova senza auto", gate != CarGate.ASK) { Hub.send(UiAction.TestWithoutCar) }
+                Btn("Stato") { Hub.screen.value = Screen.STATUS }
+                Btn("Impostazioni", icon = Ic.gear) { Hub.screen.value = Screen.SETTINGS }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Btn("Modalità passeggero") { Hub.send(UiAction.SetMode(false)) }
                 Btn("Chiudi", icon = Ic.power) { Hub.send(UiAction.Close) }
             }

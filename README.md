@@ -7,9 +7,9 @@ Cruscotto per l'auto su telefono e tablet Android, pensato per essere usato sopr
 1. Apri la pagina **Releases** di questo repository dal telefono o dal tablet.
 2. Scarica il file `Tachimetro-….apk` più recente.
 3. Aprilo e consenti l'installazione da questa fonte quando Android lo chiede.
-4. Al primo avvio concedi microfono, posizione, contatti, calendario, telefono e Bluetooth.
-5. Nelle Impostazioni di Tachimetro, alla voce Permessi, attiva anche la lettura delle notifiche (serve per messaggi e musica) e l'apertura automatica.
-6. Sempre nelle Impostazioni, alla voce Auto, scegli il Bluetooth della tua auto e inserisci gli indirizzi di casa e lavoro.
+4. Al primo avvio la configurazione guidata ti accompagna: permessi, lettura delle notifiche, Non disturbare, batteria, indirizzi di casa e lavoro.
+5. In modalità guidatore Tachimetro si attiva solo con il Bluetooth dell'auto collegato: autoradio e vivavoce li riconosce da solo, per gli altri dispositivi chiede una volta e poi ricorda. Per provarlo fuori dall'auto c'è il pulsante «Prova senza auto».
+6. Se qualcosa non funziona, apri Impostazioni, Stato e manda uno screenshot.
 
 Gli aggiornamenti si installano sopra la versione precedente senza perdere le impostazioni.
 
@@ -20,10 +20,10 @@ Gli aggiornamenti si installano sopra la versione precedente senza perdere le im
 | Navigare | «portami a casa», «portami in via Roma 10 a Napoli», «portami a casa con Waze», «torna a Google Maps», «ferma la navigazione» |
 | Musica | «metti Vasco su Spotify», «metti la playlist viaggio», «pausa», «riprendi», «avanti», «alza il volume» |
 | Radio | «metti Radio Deejay», «metti radio RTL», «radio successiva» |
-| Telefono | «chiama Luca», «leggi i messaggi», «rispondi», «entra nella riunione» |
+| Telefono | «chiama Luca», «leggi i messaggi», «rispondi», «entra nella riunione»; alle chiamate in arrivo rispondi sì o no |
 | App | «apri WhatsApp», «cerca Stranger Things su Netflix», «aggiungi Calendario alla barra» |
 | Auto | «dov'è la macchina?», «trova benzina qui vicino», «portami al primo», «che tempo fa» |
-| Modalità | «modalità passeggero», «modalità guidatore», «silenzia avvisi» |
+| Modalità | «modalità passeggero», «modalità guidatore», «silenzia avvisi», «chiudi Tachimetro» |
 | Altro | qualsiasi domanda va a Gemini |
 
 ## Cosa fa questa versione
@@ -31,7 +31,9 @@ Gli aggiornamenti si installano sopra la versione precedente senza perdere le im
 - Cruscotto con mappa di Google e pannello regolabile, tema giorno e notte automatico, barra delle app personalizzabile.
 - Parola chiave riconosciuta sul telefono, senza internet. I comandi vengono capiti dal servizio vocale di Google del telefono; se manca, dal modello vocale interno.
 - Musica di Spotify, YouTube Music e Amazon Music; radio nazionali e regionali in streaming.
-- Messaggi di WhatsApp, SMS e Teams letti ad alta voce, con risposta dettata e riletta prima dell'invio.
+- Messaggi di WhatsApp, SMS e Teams: annuncio di chi scrive (anche il gruppo), domanda se leggere, se rispondere, rilettura e conferma prima dell'invio. Gruppi configurabili e contatti preferiti.
+- Chiamate in arrivo annunciate a voce, con risposta o rifiuto dicendo sì o no.
+- Non disturbare automatico mentre guidi; chiusura completa senza processi in background; chiusura un minuto dopo lo scollegamento dall'auto, con parcheggio salvato.
 - Velocità, limite e avviso discreto durante la navigazione; autovelox fissi da OpenStreetMap.
 - Meteo e temperatura esterna, distributori più economici con i prezzi ufficiali del Ministero, parcheggio salvato quando ti scolleghi dal Bluetooth dell'auto, promemoria per le strisce blu.
 - Avvisi per batteria scarica e telefono troppo caldo.

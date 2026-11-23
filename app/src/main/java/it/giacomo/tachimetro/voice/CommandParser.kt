@@ -139,6 +139,15 @@ object CommandParser {
         return Command.AskGemini(t)
     }
 
+    /** Sì o no detto a voce; null se non si capisce. */
+    fun yesNo(text: String): Boolean? {
+        val t = normalize(text).trim()
+        if (t.isBlank()) return null
+        if (Regex("^(no|non|nah|lascia|dopo|annulla|niente|basta|ignora|rifiuta)").containsMatchIn(t)) return false
+        if (Regex("^(s[iì]|certo|ok|okay|va bene|leggi|leggilo|rispondi|invia|invialo|manda|mandalo|dai|perfetto|esatto|confermo)").containsMatchIn(t)) return true
+        return null
+    }
+
     private fun normalizePlace(prep: String, place: String): String {
         val p = place.trim()
         if (p == "casa" || p == "casa mia" || (prep.trim() == "a" && p == "casa")) return "@casa"

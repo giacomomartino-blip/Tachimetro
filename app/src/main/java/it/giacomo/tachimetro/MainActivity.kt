@@ -11,6 +11,8 @@ import android.content.pm.PackageManager
 import android.media.AudioManager
 import android.media.ToneGenerator
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -43,6 +45,7 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import it.giacomo.tachimetro.car.Car
 import it.giacomo.tachimetro.car.CarLink
+import it.giacomo.tachimetro.car.Dnd
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
 import it.giacomo.tachimetro.data.Prefs
@@ -59,9 +62,13 @@ import it.giacomo.tachimetro.ui.ModeChooser
 import it.giacomo.tachimetro.ui.NIGHT
 import it.giacomo.tachimetro.ui.ParkingScreen
 import it.giacomo.tachimetro.ui.WaitingForCar
+import it.giacomo.tachimetro.ui.SetupScreen
+import it.giacomo.tachimetro.ui.StatusScreen
+import it.giacomo.tachimetro.ui.WakeTestScreen
 import it.giacomo.tachimetro.ui.PassengerScreen
 import it.giacomo.tachimetro.ui.SettingsScreen
 import it.giacomo.tachimetro.ui.rememberAutoNight
+import it.giacomo.tachimetro.voice.QuickAsk
 import it.giacomo.tachimetro.voice.VoiceService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -78,6 +85,8 @@ class MainActivity : ComponentActivity() {
         Manifest.permission.CALL_PHONE,
         Manifest.permission.READ_CALENDAR,
         Manifest.permission.BLUETOOTH_CONNECT,
+        Manifest.permission.READ_PHONE_STATE,
+        Manifest.permission.ANSWER_PHONE_CALLS,
     )
 
     private val askPermissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
@@ -88,11 +97,13 @@ class MainActivity : ComponentActivity() {
     private var settings = AppSettings()
     private var settingsLoaded = false
     private var gateKey = ""
+    private var quickAsk: QuickAsk? = null
+    private var askedThisSession = HashSet<String>()
+    private val ui = Handler(Looper.getMainLooper())
 
     /** Collegamento e scollegamento del Bluetooth mentre Tachimetro è aperto. */
     private val carReceiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
-            val s = settings
             if (i.action == BluetoothAdapter.ACTION_STATE_CHANGED) {
                 evaluateGate()
                 return
@@ -100,24 +111,30 @@ class MainActivity : ComponentActivity() {
             @Suppress("DEPRECATION")
             val dev = i.getParcelableExtra<BluetoothDevice>(BluetoothDevice.EXTRA_DEVICE) ?: return
             val addr = try { dev.address } catch (e: SecurityException) { return }
-            if (s.carBtAddress.isBlank() || !addr.equals(s.carBtAddress, true)) return
             when (i.action) {
-                BluetoothDevice.ACTION_ACL_CONNECTED -> window.decorView.postDelayed({ evaluateGate() }, 1500)
-                BluetoothDevice.ACTION_ACL_DISCONNECTED -> onCarDisconnected()
+                // l'autoradio collega vivavoce e musica qualche secondo dopo: riprovo più volte
+                BluetoothDevice.ACTION_ACL_CONNECTED -> listOf(1500L, 4000L, 8000L).forEach { d ->
+                    ui.postDelayed({ if (Hub.carGate.value != CarGate.READY || Hub.closingIn.value != null) evaluateGate() }, d)
+                }
+                BluetoothDevice.ACTION_ACL_DISCONNECTED -> if (isKnownCar(addr)) onCarDisconnected()
             }
         }
     }
 
+    private fun isKnownCar(addr: String) = settings.knownCars.any { it.startsWith(addr, true) }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
+        // se l'app era stata chiusa di colpo, rimette «Non disturbare» com'era
+        Dnd.restore(this)
         readScreenExtra(intent)
 
         lifecycleScope.launch {
             Prefs.flow(applicationContext).collect { s ->
                 settings = s
                 settingsLoaded = true
-                val key = listOf(s.mode, s.requireCar, s.carBtAddress).joinToString("|")
+                val key = listOf(s.mode, s.requireCar, s.knownCars.joinToString(","), s.notCars.joinToString(",")).joinToString("|")
                 if (key != gateKey) {
                     gateKey = key
                     evaluateGate()
@@ -155,38 +172,75 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(carReceiver) } catch (e: Exception) { }
+        quickAsk?.release()
         if (isFinishing) shutdown()
         super.onDestroy()
     }
 
     /**
-     * In modalità guidatore Tachimetro si attiva solo se il telefono è collegato al Bluetooth dell'auto.
-     * In modalità passeggero (tablet con le cuffie) non serve.
+     * In modalità guidatore Tachimetro si attiva solo con l'auto collegata.
+     * Riconosce da solo autoradio e vivavoce; per gli altri dispositivi chiede una volta e poi ricorda.
+     * In modalità passeggero e in prova senza auto non serve.
      */
     private fun evaluateGate() {
         val s = settings
-        if (s.mode == "passenger" || !s.requireCar) {
+        if (s.mode == "passenger" || !s.requireCar || Hub.testMode.value) {
             activate()
             return
         }
-        if (s.carBtAddress.isBlank()) {
-            Hub.carGate.value = CarGate.NOT_SET
-            deactivate()
-            return
-        }
         if (Hub.carGate.value != CarGate.READY) Hub.carGate.value = CarGate.CHECKING
-        CarLink.check(this, s.carBtAddress) { ok ->
-            when (ok) {
-                true -> activate()
-                false -> {
-                    Hub.carGate.value = CarGate.WAITING
-                    deactivate()
-                }
-                null -> {
-                    Hub.carGate.value = CarGate.NO_PERMISSION
-                    deactivate()
-                }
+        CarLink.scan(this) { list ->
+            if (list == null) {
+                Hub.carGate.value = CarGate.NO_PERMISSION
+                deactivate()
+                return@scan
             }
+            val known = list.firstOrNull { isKnownCar(it.address) }
+            if (known != null) {
+                Hub.carName.value = known.name
+                cancelClose()
+                activate()
+                return@scan
+            }
+            val car = list.firstOrNull { it.isCar && it.address !in s.notCars }
+            if (car != null) {
+                Hub.carName.value = car.name
+                lifecycleScope.launch { Prefs.addKnownCar(applicationContext, car.address, car.name) }
+                cancelClose()
+                activate()
+                return@scan
+            }
+            val other = list.firstOrNull { it.address !in s.notCars }
+            if (other != null) {
+                Hub.askCar.value = other
+                Hub.carGate.value = CarGate.ASK
+                deactivate()
+                if (askedThisSession.add(other.address)) {
+                    val q = quickAsk ?: QuickAsk(this).also { quickAsk = it }
+                    q.ask("Sei in auto con ${other.name}?") { answer ->
+                        if (answer != null && Hub.carGate.value == CarGate.ASK) handleCarAnswer(other, answer)
+                    }
+                }
+                return@scan
+            }
+            if (Hub.closingIn.value == null) {
+                Hub.carGate.value = CarGate.WAITING
+                deactivate()
+            }
+        }
+    }
+
+    private fun handleCarAnswer(device: BtDevice, isCar: Boolean) {
+        Hub.askCar.value = null
+        lifecycleScope.launch {
+            if (isCar) Prefs.addKnownCar(applicationContext, device.address, device.name)
+            else Prefs.addNotCar(applicationContext, device.address)
+        }
+        if (isCar) {
+            Hub.carName.value = device.name
+            activate()
+        } else {
+            Hub.carGate.value = CarGate.WAITING
         }
     }
 
@@ -194,6 +248,7 @@ class MainActivity : ComponentActivity() {
         Hub.carGate.value = CarGate.READY
         NotificationReader.rebind(this)
         if (!VoiceService.running) VoiceService.start(this)
+        if (settings.dnd && settings.mode != "passenger") Dnd.enable(this)
         // la mappa riparte da sola dopo aver concesso la posizione
         if (BuildConfig.HAS_MAPS_KEY && NavController.navigator == null &&
             checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
@@ -206,26 +261,51 @@ class MainActivity : ComponentActivity() {
     private fun deactivate() {
         if (VoiceService.running) stopService(Intent(this, VoiceService::class.java))
         NavController.stop()
+        Dnd.restore(this)
     }
 
-    /** L'auto si è scollegata: salva il parcheggio e chiude tutto. */
+    // ---------- scollegamento: un minuto di tolleranza prima di chiudere ----------
+
+    private val tick = object : Runnable {
+        override fun run() {
+            val left = (Hub.closingIn.value ?: return) - 1
+            if (left <= 0) {
+                Hub.closingIn.value = null
+                closeApp()
+            } else {
+                Hub.closingIn.value = left
+                ui.postDelayed(this, 1000)
+            }
+        }
+    }
+
+    /** L'auto si è scollegata: salva subito il parcheggio e chiude tra un minuto, se non si ricollega. */
     private fun onCarDisconnected() {
         val s = settings
-        if (s.mode == "passenger" || !s.requireCar || Hub.carGate.value != CarGate.READY) return
+        if (s.mode == "passenger" || !s.requireCar || Hub.testMode.value || Hub.carGate.value != CarGate.READY) return
+        if (Hub.closingIn.value != null) return
         val loc = Hub.location.value
-        lifecycleScope.launch {
-            if (s.saveParking && loc != null) Car.saveParking(applicationContext, loc)
-            closeApp()
-        }
+        if (s.saveParking && loc != null) lifecycleScope.launch { Car.saveParking(applicationContext, loc) }
+        Hub.closingIn.value = 60
+        ui.removeCallbacks(tick)
+        ui.postDelayed(tick, 1000)
+    }
+
+    private fun cancelClose() {
+        ui.removeCallbacks(tick)
+        Hub.closingIn.value = null
     }
 
     /** Chiusura completa: nessun servizio, ascolto, GPS o lettura notifiche resta attivo. */
     private fun shutdown() {
+        cancelClose()
         stopService(Intent(this, VoiceService::class.java))
         NavController.release()
         Radio.release()
         MediaSessions.stop()
         NotificationReader.unbind()
+        Dnd.restore(this)
+        Hub.testMode.value = false
         Hub.carGate.value = CarGate.CHECKING
     }
 
@@ -303,6 +383,17 @@ class MainActivity : ComponentActivity() {
             }
             is UiAction.Show -> Hub.screen.value = a.screen
             UiAction.Close -> closeApp()
+            UiAction.StayOpen -> {
+                // resti in auto senza Bluetooth: Tachimetro resta attivo finché non lo chiudi
+                cancelClose()
+                Hub.testMode.value = true
+            }
+            UiAction.TestWithoutCar -> {
+                Hub.testMode.value = true
+                Hub.askCar.value = null
+                activate()
+            }
+            is UiAction.CarAnswer -> handleCarAnswer(a.device, a.isCar)
             is UiAction.SetMode -> {
                 Prefs.edit(applicationContext) { it[Keys.mode] = if (a.driver) "driver" else "passenger" }
                 Hub.screen.value = if (a.driver) Screen.DASHBOARD else Screen.PASSENGER
@@ -362,14 +453,18 @@ fun TachiRoot(onAskPermissions: () -> Unit) {
     CompositionLocalProvider(LocalPal provides pal) {
         val insets = if (s.fullScreen) WindowInsets.displayCutout else WindowInsets.safeDrawing
         Box(Modifier.fillMaxSize().background(pal.bg).windowInsetsPadding(insets).offset(dx.dp, dy.dp)) {
-            if (!chosen && s.startMode == "ask") {
+            if (!s.setupDone) {
+                SetupScreen(s, onAskPermissions)
+            } else if (!chosen && s.startMode == "ask") {
                 ModeChooser { driver ->
                     chosen = true
                     scope.launch { Prefs.edit(context) { it[Keys.mode] = if (driver) "driver" else "passenger" } }
                     Hub.screen.value = if (driver) Screen.DASHBOARD else Screen.PASSENGER
                 }
-            } else if (s.mode != "passenger" && s.requireCar && gate != CarGate.READY && screen != Screen.SETTINGS) {
-                WaitingForCar(gate, s.carBtName)
+            } else if (s.mode != "passenger" && s.requireCar && gate != CarGate.READY &&
+                screen !in setOf(Screen.SETTINGS, Screen.STATUS, Screen.SETUP)
+            ) {
+                WaitingForCar(gate)
             } else {
                 when (screen) {
                     Screen.DASHBOARD -> if (s.mode == "passenger") PassengerScreen(s, night) else DriverDashboard(s, night)
@@ -378,6 +473,9 @@ fun TachiRoot(onAskPermissions: () -> Unit) {
                     Screen.APP_BAR -> AppBarScreen(s)
                     Screen.PARKING -> ParkingScreen(s)
                     Screen.FUEL -> FuelScreen(s)
+                    Screen.SETUP -> SetupScreen(s, onAskPermissions)
+                    Screen.STATUS -> StatusScreen(s)
+                    Screen.WAKE_TEST -> WakeTestScreen(s)
                 }
             }
         }
