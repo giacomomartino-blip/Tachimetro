@@ -153,9 +153,12 @@ object NavController {
     /** Libera la navigazione quando chiudi Tachimetro, così non resta nulla attivo. */
     fun release() {
         stop()
+        // libera il navigatore (il nome del metodo è cambiato tra le versioni dell'SDK)
+        val n = navigator
         try {
-            NavigationApi.cleanup()
+            if (n != null) n.javaClass.getMethod("cleanup").invoke(n)
         } catch (e: Exception) {
+            try { NavigationApi::class.java.getMethod("cleanup").invoke(null) } catch (e2: Exception) { }
         }
         navigator = null
         initializing = false
