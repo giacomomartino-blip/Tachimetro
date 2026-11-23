@@ -253,6 +253,7 @@ fun SettingsScreen(s: AppSettings, onAskPermissions: () -> Unit) {
                     }
                     Toggle("Meteo e temperatura esterna", s.weatherOn) { v -> set { it[Keys.weatherOn] = v } }
                     Toggle("Apri quando entro in auto", s.autoStart) { v -> set { it[Keys.autoStart] = v } }
+                    Toggle("Schermo intero, senza barre di Android", s.fullScreen) { v -> set { it[Keys.fullScreen] = v } }
                     Toggle("Schermo sempre acceso", s.keepScreenOn) { v -> set { it[Keys.keepScreenOn] = v } }
                     Toggle("Protezione anti burn-in", s.burnIn) { v -> set { it[Keys.burnIn] = v } }
                     Toggle("Salva dove parcheggi", s.saveParking) { v -> set { it[Keys.saveParking] = v } }

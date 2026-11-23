@@ -13,7 +13,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -27,6 +31,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
 import it.giacomo.tachimetro.data.AppSettings
 import it.giacomo.tachimetro.data.Keys
@@ -69,6 +76,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         readScreenExtra(intent)
 
         lifecycleScope.launch {
@@ -119,7 +127,24 @@ class MainActivity : ComponentActivity() {
         VoiceService.start(this)
     }
 
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) applyFullScreen(settings.fullScreen)
+    }
+
+    /** Nasconde la barra di stato e i tasti di Android; riappaiono per un attimo scorrendo dal bordo. */
+    private fun applyFullScreen(on: Boolean) {
+        val c = WindowInsetsControllerCompat(window, window.decorView)
+        if (on) {
+            c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            c.hide(WindowInsetsCompat.Type.systemBars())
+        } else {
+            c.show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
     private fun applyWindow(s: AppSettings, hot: Boolean) {
+        applyFullScreen(s.fullScreen)
         if (s.keepScreenOn) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val lp = window.attributes
@@ -216,7 +241,8 @@ fun TachiRoot(onAskPermissions: () -> Unit) {
     }
 
     CompositionLocalProvider(LocalPal provides pal) {
-        Box(Modifier.fillMaxSize().background(pal.bg).offset(dx.dp, dy.dp)) {
+        val insets = if (s.fullScreen) WindowInsets.displayCutout else WindowInsets.safeDrawing
+        Box(Modifier.fillMaxSize().background(pal.bg).windowInsetsPadding(insets).offset(dx.dp, dy.dp)) {
             if (!chosen && s.startMode == "ask") {
                 ModeChooser { driver ->
                     chosen = true
