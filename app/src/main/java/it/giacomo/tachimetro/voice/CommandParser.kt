@@ -321,7 +321,7 @@ object CommandParser {
      * Il destinatario e il testo li separa poi chi invia, cercando il nome più lungo tra i contatti.
      */
     private fun sendMessage(verb: String, after: String): Command? {
-        var rest = (if (verb == "messaggio") "messaggio $after" else after).trim()
+        var rest = (if (verb == "messaggio") "messaggio $after" else after).trim() + " "
         var app: String? = null
         val head = Regex("^((un|il|uno|una|l')\\s+)?((messaggio|messaggino|sms|whatsapp)\\s+)?((su|con|via|tramite|per)\\s+(whatsapp|sms|teams)\\s+)?((messaggio|whatsapp|sms)\\s+)?")
         head.find(rest)?.let { h ->
@@ -334,6 +334,7 @@ object CommandParser {
             }
             rest = rest.substring(h.range.last + 1)
         }
+        rest = rest.trim()
         // «manda la posizione», «invia la mail» e simili non sono messaggi
         if (app == null && verb != "messaggio" && !Regex("^(a|ad|al|alla|allo|all'|ai|per)\\b").containsMatchIn(rest) && rest.isNotBlank()) return null
         rest = rest.replace(Regex("^(a|ad|al|alla|allo|all'|ai|per)\\s*"), "")
@@ -352,7 +353,7 @@ object CommandParser {
     private fun cleanPlaceQuery(q: String): String = q
         .replace(Regex("\\b(il|la|lo|l')?\\s*$NEAR\\b"), "")
         .replace(Regex("\\b(il |la |lo |l')?(miglior[ei]?|più buon[oa])\\b"), "")
-        .replace(Regex("^(un|una|uno|un'|il|la|lo|l'|i|le|gli|dei|delle|degli|qualche|al|alla|allo|all')\\s*"), "")
+        .replace(Regex("^(un'|l'|all')\\s*|^(una|uno|un|il|la|lo|i|le|gli|dei|delle|degli|qualche|al|alla|allo)\\s+"), "")
         .replace(Regex("\\s+"), " ")
         .trim()
 
